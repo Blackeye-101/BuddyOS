@@ -251,11 +251,11 @@ Important:
 - Be concise - each fact should be one sentence
 """
             
-            # Use Gemini 3.1 Flash for extraction (free, fast)
+            # Use Gemini 2.5 Flash for extraction (free, fast, stable)
             messages = [{"role": "user", "content": extraction_prompt}]
             
             result = await self.router.get_completion(
-                model_id="gemini-3.1-flash",
+                model_id="gemini/gemini-2.5-flash",  # ✅ Actual Google API model name
                 messages=messages,
                 temperature=0.1,  # Low temperature for consistent extraction
                 max_tokens=1000

@@ -112,33 +112,33 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
     ],
     "google": [
         ModelInfo(
-            model_id="gemini-2.5-flash",
+            model_id="gemini/gemini-2.5-flash",  # ✅ Actual Google API name (stable)
             provider="google",
             display_name="Gemini 2.5 Flash",
             requires_key="GEMINI_API_KEY",
-            description="Latest fast and efficient Gemini model",
+            description="Fast and efficient model (stable, recommended)",
             tier="free",
             context_window=1000000,  # 1M tokens
             max_tokens=64000  # 64K max output
         ),
         ModelInfo(
-            model_id="gemini-3-1-flash",
+            model_id="gemini/gemini-3.1-flash-lite-preview",  # ✅ Actual Google API name
             provider="google",
-            display_name="Gemini 3.1 Flash",
+            display_name="Gemini 3.1 Flash Lite",
             requires_key="GEMINI_API_KEY",
-            description="Fast and efficient model",
+            description="Lightweight and ultra-efficient (preview)",
             tier="free",
             context_window=1000000,  # 1M tokens
-            max_tokens=64000  # 64K max output
+            max_tokens=32000  # 32K max output
         ),
         ModelInfo(
-            model_id="gemini-3-1-pro",
+            model_id="gemini/gemini-3.1-pro-preview",  # ✅ Actual Google API name
             provider="google",
             display_name="Gemini 3.1 Pro",
             requires_key="GEMINI_API_KEY",
-            description="Advanced reasoning capabilities (requires Pro plan)",
+            description="Advanced reasoning capabilities (preview, requires Pro plan)",
             tier="paid",
-            context_window=1000000,  # 1M tokens
+            context_window=2000000,  # 2M tokens!
             max_tokens=65536  # 65K max output
         ),
     ],
