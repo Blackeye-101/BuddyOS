@@ -71,12 +71,14 @@ def discover_available_models(include_paid: bool = True) -> List[ModelInfo]:
     if not available_models:
         # Return free tier options that don't require keys
         fallback = ModelInfo(
-            model_id="gemini-3.1-flash",
+            model_id="gemini/gemini-2.5-flash",  # ✅ Actual Google API model name
             provider="google",
-            display_name="Gemini 3.1 Flash (Fallback)",
+            display_name="Gemini 2.5 Flash (Fallback)",
             requires_key="GEMINI_API_KEY",
             description="Default free model - configure API keys for more options",
-            tier="free"
+            tier="free",
+            context_window=1000000,
+            max_tokens=64000
         )
         available_models.append(fallback)
     
@@ -128,12 +130,14 @@ def get_default_model() -> ModelInfo:
     
     # Ultimate fallback
     return ModelInfo(
-        model_id="gemini-3.1-flash",
+        model_id="gemini/gemini-2.5-flash",  # ✅ Actual Google API model name
         provider="google",
-        display_name="Gemini 3.1 Flash",
+        display_name="Gemini 2.5 Flash",
         requires_key="GEMINI_API_KEY",
         description="Free tier default model",
-        tier="free"
+        tier="free",
+        context_window=1000000,
+        max_tokens=64000
     )
 
 

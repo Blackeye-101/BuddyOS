@@ -61,8 +61,8 @@ class BuddyRouter:
         self.available_models = discover_available_models(include_paid=True)
         self.free_models = get_free_models()
         
-        # Ultimate fallback
-        self.ultimate_fallback = "gemini-3.1-flash"
+        # Ultimate fallback (actual Google API model name)
+        self.ultimate_fallback = "gemini/gemini-2.5-flash"
         
         logger.info(f"Router initialized with {len(self.available_models)} available models")
         logger.info(f"Ultimate fallback: {self.ultimate_fallback}")
