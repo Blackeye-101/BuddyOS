@@ -9,6 +9,9 @@ venv/
 ENV/
 env/
 
+# .github 
+.github/
+
 # Environment
 .env
 
