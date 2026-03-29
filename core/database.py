@@ -15,6 +15,8 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 
+from core.fact_utils import FactNormalizer
+
 
 @dataclass
 class Conversation:
@@ -36,6 +38,8 @@ class Message:
     model_id: str
     token_count: int
     created_at: str
+    keywords: str = ""
+    topics: str = ""
 
 
 @dataclass
@@ -47,6 +51,7 @@ class UserFact:
     confidence: float  # 0.0 to 1.0
     last_seen: str
     is_active: bool = True
+    fact_key: Optional[str] = None
 
 
 class BuddyDatabase:
@@ -70,6 +75,7 @@ class BuddyDatabase:
         self.duckdb_path = duckdb_path
         self._sqlite_conn: Optional[aiosqlite.Connection] = None
         self._duckdb_conn: Optional[duckdb.DuckDBPyConnection] = None
+        self._normalizer: Optional[FactNormalizer] = None
     
     async def initialize(self):
         """Initialize both databases and create schemas."""
@@ -109,18 +115,37 @@ class BuddyDatabase:
                 model_id TEXT NOT NULL,
                 token_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
+                keywords TEXT NOT NULL DEFAULT '',
+                topics TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (conversation_id) 
                     REFERENCES conversations(id) 
                     ON DELETE CASCADE
             )
         """)
-        
+
+        # Migration guards for existing databases
+        for col, definition in [
+            ("keywords", "TEXT NOT NULL DEFAULT ''"),
+            ("topics",   "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            try:
+                await self._sqlite_conn.execute(
+                    f"ALTER TABLE messages ADD COLUMN {col} {definition}"
+                )
+            except Exception:
+                pass  # Column already exists — safe to ignore
+
         # Create index for messages
         await self._sqlite_conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_messages_conversation 
             ON messages(conversation_id, created_at)
         """)
-        
+
+        await self._sqlite_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_keywords
+            ON messages(conversation_id, keywords)
+        """)
+
         await self._sqlite_conn.commit()
     
     async def _init_duckdb(self):
@@ -132,6 +157,7 @@ class BuddyDatabase:
             self._duckdb_conn.execute("""
                 CREATE TABLE IF NOT EXISTS facts (
                     id VARCHAR PRIMARY KEY,
+                    fact_key VARCHAR,
                     category VARCHAR NOT NULL,
                     fact_text VARCHAR NOT NULL,
                     confidence DOUBLE NOT NULL,
@@ -150,9 +176,15 @@ class BuddyDatabase:
                 CREATE INDEX IF NOT EXISTS idx_facts_category 
                 ON facts(category, is_active)
             """)
+
+            self._duckdb_conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_key
+                ON facts(fact_key)
+            """)
         
         # Wrap synchronous DuckDB in async
         await asyncio.to_thread(_create_duckdb_schema)
+        self._normalizer = FactNormalizer()
     
     # ============================================
     # Conversation Methods (SQLite - Async)
@@ -277,37 +309,52 @@ class BuddyDatabase:
         role: str,
         content: str,
         model_id: str,
-        token_count: int
+        token_count: int,
+        keywords: str = "",
+        topics: str = "",
     ) -> str:
         """
         Save a message to a conversation.
-        
+
         Args:
             conversation_id: UUID of conversation
             role: 'user', 'assistant', or 'system'
             content: Message content
             model_id: Model that generated the message
             token_count: Number of tokens in the message
-            
+            keywords: Comma-sentinel string e.g. ",python,django," for exact-word LIKE search
+            topics: Comma-separated LLM-generated topic labels (may be filled later)
+
         Returns:
             message_id: UUID of created message
         """
         message_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
-        
+
         await self._sqlite_conn.execute(
             """
-            INSERT INTO messages (id, conversation_id, role, content, model_id, token_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages
+                (id, conversation_id, role, content, model_id, token_count, created_at,
+                 keywords, topics)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, conversation_id, role, content, model_id, token_count, now)
+            (message_id, conversation_id, role, content, model_id, token_count, now,
+             keywords, topics),
         )
         await self._sqlite_conn.commit()
-        
+
         # Update conversation timestamp
         await self.update_conversation_timestamp(conversation_id)
-        
+
         return message_id
+
+    async def update_message_topics(self, message_id: str, topics: str) -> None:
+        """Back-fill the topics column after background LLM extraction."""
+        await self._sqlite_conn.execute(
+            "UPDATE messages SET topics = ? WHERE id = ?",
+            (topics, message_id),
+        )
+        await self._sqlite_conn.commit()
     
     async def get_conversation_history(
         self,
@@ -325,15 +372,16 @@ class BuddyDatabase:
             List of Message objects in chronological order
         """
         query = """
-            SELECT id, conversation_id, role, content, model_id, token_count, created_at
+            SELECT id, conversation_id, role, content, model_id, token_count, created_at,
+                   keywords, topics
             FROM messages
             WHERE conversation_id = ?
             ORDER BY created_at ASC
         """
-        
+
         if limit:
             query += f" LIMIT {limit}"
-        
+
         messages = []
         async with self._sqlite_conn.execute(query, (conversation_id,)) as cursor:
             async for row in cursor:
@@ -344,49 +392,103 @@ class BuddyDatabase:
                     content=row[3],
                     model_id=row[4],
                     token_count=row[5],
-                    created_at=row[6]
+                    created_at=row[6],
+                    keywords=row[7] or "",
+                    topics=row[8] or "",
                 ))
         return messages
     
     async def get_recent_history(
         self,
         conversation_id: str,
-        limit: int = 20
+        query_keywords: Optional[List[str]] = None,
+        tier1_limit: int = 5,
+        token_budget: int = 1000,
     ) -> List[Dict[str, str]]:
         """
-        Get recent messages formatted for PydanticAI.
-        
-        This is the key method for Step 4 (Orchestrator).
-        
+        Two-tiered retrieval of conversation history for LLM context.
+
+        Tier 1 (temporal): the absolute last `tier1_limit` messages.
+        Tier 2 (semantic):  up to 3 historical messages whose `keywords`
+            column contains any of `query_keywords` (exact-word match via
+            comma-sentinel LIKE pattern ',keyword,').
+
+        The merged list is deduplicated, sorted chronologically, and capped
+        at `token_budget` tokens. Tier 1 messages are always included first.
+
         Args:
             conversation_id: UUID of conversation
-            limit: Number of recent messages to retrieve
-            
+            query_keywords: Keywords extracted from the current user message
+            tier1_limit: Number of most-recent messages always included
+            token_budget: Maximum total token_count across all returned messages
+
         Returns:
-            List of message dicts in format: [{"role": "user", "content": "..."}]
+            List of {"role": str, "content": str} dicts in chronological order
         """
-        messages = []
-        
-        # Get last N messages
+        # -- Tier 1: last N messages -----------------------------------------
+        tier1_rows: list[tuple] = []
         async with self._sqlite_conn.execute(
             """
-            SELECT role, content
+            SELECT id, role, content, token_count, created_at
             FROM messages
             WHERE conversation_id = ?
             ORDER BY created_at DESC
             LIMIT ?
             """,
-            (conversation_id, limit)
+            (conversation_id, tier1_limit),
         ) as cursor:
             async for row in cursor:
-                messages.append({
-                    "role": row[0],
-                    "content": row[1]
-                })
-        
-        # Reverse to get chronological order
-        messages.reverse()
-        return messages
+                tier1_rows.append(row)
+        tier1_rows.reverse()  # chronological order
+        tier1_ids = {row[0] for row in tier1_rows}
+
+        # -- Tier 2: keyword-matched historical messages ----------------------
+        tier2_hits: dict[str, list] = {}  # id -> [id, role, content, token_count, created_at, hit_count]
+        if query_keywords:
+            for kw in query_keywords:
+                # Comma-sentinel exact-word match: '%,keyword,%' finds the sentinel
+                # anywhere in the stored string while preventing partial-word hits
+                # (e.g. ',python,' in '%,python,%' does NOT match ',pythonic,')
+                pattern = f"%,{kw},%"
+                async with self._sqlite_conn.execute(
+                    """
+                    SELECT id, role, content, token_count, created_at
+                    FROM messages
+                    WHERE conversation_id = ? AND keywords LIKE ?
+                    """,
+                    (conversation_id, pattern),
+                ) as cursor:
+                    async for row in cursor:
+                        msg_id = row[0]
+                        if msg_id in tier1_ids:
+                            continue
+                        if msg_id in tier2_hits:
+                            tier2_hits[msg_id][-1] += 1
+                        else:
+                            tier2_hits[msg_id] = [*row, 1]  # append hit_count
+
+        # Sort by hit count desc, take top 3
+        tier2_rows = sorted(tier2_hits.values(), key=lambda r: r[-1], reverse=True)[:3]
+
+        # -- Merge, sort chronologically, apply token budget ------------------
+        # Tier 1 always included first; Tier 2 fills remaining budget
+        budget_used = sum(r[3] for r in tier1_rows)
+        selected_tier2: list[tuple] = []
+        for row in sorted(tier2_rows, key=lambda r: r[4]):  # sort by created_at
+            token_count = row[3]
+            if budget_used + token_count <= token_budget:
+                selected_tier2.append(row)
+                budget_used += token_count
+
+        # Combine and sort all selected rows by created_at
+        all_rows = [
+            (r[0], r[1], r[2], r[4]) for r in tier1_rows  # (id, role, content, created_at)
+        ] + [
+            (r[0], r[1], r[2], r[4]) for r in selected_tier2
+        ]
+        all_rows.sort(key=lambda r: r[3])  # sort by created_at ASC
+
+        return [{"role": r[1], "content": r[2]} for r in all_rows]
     
     async def get_conversation_token_count(self, conversation_id: str) -> int:
         """
@@ -416,30 +518,57 @@ class BuddyDatabase:
         confidence: float
     ) -> str:
         """
-        Save a user fact to DuckDB.
-        
+        Save a user fact to DuckDB using an UPSERT pattern keyed on fact_key.
+
+        - New fact → INSERT.
+        - Duplicate fact (same key, same text) → increment confidence (+0.1, max 1.0).
+        - Contradiction (same key, different text) → overwrite text, reset confidence to 0.6.
+
         Args:
             category: Fact category (Personal, Professional, Preferences, Tech Stack, or dynamic)
             fact_text: The actual fact
-            confidence: Confidence score (0.0 to 1.0)
-            
+            confidence: Initial confidence score (0.0 to 1.0)
+
         Returns:
-            fact_id: UUID of created fact
+            fact_id: UUID of the affected row
         """
-        def _save_fact():
-            fact_id = str(uuid.uuid4())
+        fact_key = await self._normalizer.normalize(category, fact_text)
+        normalizer = self._normalizer  # capture for thread closure
+
+        def _upsert_fact() -> str:
             now = datetime.utcnow().isoformat()
-            
+
+            existing = self._duckdb_conn.execute(
+                "SELECT id, fact_text, confidence FROM facts WHERE fact_key = ? AND is_active = TRUE",
+                (fact_key,),
+            ).fetchone()
+
+            if existing:
+                existing_id, existing_text, existing_conf = existing
+                if normalizer.is_contradiction(fact_key, existing_text, fact_text):
+                    self._duckdb_conn.execute(
+                        "UPDATE facts SET fact_text = ?, confidence = 0.6, last_seen = ? WHERE id = ?",
+                        (fact_text, now, existing_id),
+                    )
+                else:
+                    new_conf = min(existing_conf + 0.1, 1.0)
+                    self._duckdb_conn.execute(
+                        "UPDATE facts SET confidence = ?, last_seen = ? WHERE id = ?",
+                        (new_conf, now, existing_id),
+                    )
+                return existing_id
+
+            fact_id = str(uuid.uuid4())
             self._duckdb_conn.execute(
                 """
-                INSERT INTO facts (id, category, fact_text, confidence, last_seen, is_active)
-                VALUES (?, ?, ?, ?, ?, TRUE)
+                INSERT INTO facts (id, fact_key, category, fact_text, confidence, last_seen, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, TRUE)
                 """,
-                (fact_id, category, fact_text, confidence, now)
+                (fact_id, fact_key, category, fact_text, confidence, now),
             )
             return fact_id
-        
-        return await asyncio.to_thread(_save_fact)
+
+        return await asyncio.to_thread(_upsert_fact)
     
     async def get_user_facts(self, active_only: bool = True) -> List[UserFact]:
         """
