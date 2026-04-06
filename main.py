@@ -6,9 +6,48 @@ Demonstrates persistent memory across sessions.
 """
 
 import asyncio
+import logging
+import logging.handlers
 import os
 import sys
 from pathlib import Path
+
+# ── Logging bootstrap (must run before any local imports) ──────────────────────
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(exist_ok=True)
+
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.DEBUG)  # capture everything at root level
+
+# File handler: rotating, captures DEBUG+, no console spam
+_file_handler = logging.handlers.RotatingFileHandler(
+    LOGS_DIR / "buddy-os.log",
+    maxBytes=5 * 1024 * 1024,  # 5 MB per file
+    backupCount=3,
+    encoding="utf-8",
+)
+_file_handler.setLevel(logging.DEBUG)
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+)
+_root_logger.addHandler(_file_handler)
+
+# Console handler: WARNING+ only
+_console_handler = logging.StreamHandler(sys.stderr)
+_console_handler.setLevel(logging.WARNING)
+_console_handler.setFormatter(
+    logging.Formatter("%(levelname)s: %(message)s")
+)
+_root_logger.addHandler(_console_handler)
+
+# Silence LiteLLM's internal loggers and print-based chatter
+import litellm  # noqa: E402
+litellm.suppress_debug_info = True
+litellm.verbose = False
+litellm.drop_params = True  # Strip unsupported params (e.g. temperature for gpt-5) before sending
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+logging.getLogger("litellm").setLevel(logging.WARNING)
+# ──────────────────────────────────────────────────────────────────────────────
 
 # Ensure data directory exists
 DATA_DIR = Path("data")
@@ -322,6 +361,8 @@ class BuddyOSCLI:
     
     async def cleanup(self):
         """Cleanup resources."""
+        if self.orchestrator:
+            await self.orchestrator.wait_background_tasks()
         if self.db:
             await self.db.close()
         print("✅ Resources cleaned up")

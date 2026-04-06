@@ -18,8 +18,7 @@ from core.discovery import discover_available_models, get_model_by_id, get_free_
 from core.models import ModelInfo
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Logging is configured centrally in main.py
 logger = logging.getLogger(__name__)
 
 

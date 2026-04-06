@@ -15,8 +15,6 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 
-from core.fact_utils import FactNormalizer
-
 
 @dataclass
 class Conversation:
@@ -75,7 +73,7 @@ class BuddyDatabase:
         self.duckdb_path = duckdb_path
         self._sqlite_conn: Optional[aiosqlite.Connection] = None
         self._duckdb_conn: Optional[duckdb.DuckDBPyConnection] = None
-        self._normalizer: Optional[FactNormalizer] = None
+        self._normalizer = None  # Injected by BuddyOrchestrator after init
     
     async def initialize(self):
         """Initialize both databases and create schemas."""
@@ -184,7 +182,6 @@ class BuddyDatabase:
         
         # Wrap synchronous DuckDB in async
         await asyncio.to_thread(_create_duckdb_schema)
-        self._normalizer = FactNormalizer()
     
     # ============================================
     # Conversation Methods (SQLite - Async)
@@ -515,7 +512,8 @@ class BuddyDatabase:
         self,
         category: str,
         fact_text: str,
-        confidence: float
+        confidence: float,
+        model_id: Optional[str] = None,
     ) -> str:
         """
         Save a user fact to DuckDB using an UPSERT pattern keyed on fact_key.
@@ -528,11 +526,12 @@ class BuddyDatabase:
             category: Fact category (Personal, Professional, Preferences, Tech Stack, or dynamic)
             fact_text: The actual fact
             confidence: Initial confidence score (0.0 to 1.0)
+            model_id: Active model to use for LLM-based key normalisation (avoids hardcoded defaults)
 
         Returns:
             fact_id: UUID of the affected row
         """
-        fact_key = await self._normalizer.normalize(category, fact_text)
+        fact_key = await self._normalizer.normalize(category, fact_text, model=model_id)
         normalizer = self._normalizer  # capture for thread closure
 
         def _upsert_fact() -> str:

@@ -21,8 +21,7 @@ from core.database import BuddyDatabase, UserFact
 from core.router import BuddyRouter
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Logging is configured centrally in main.py
 logger = logging.getLogger(__name__)
 
 
@@ -64,11 +63,31 @@ class BuddyOrchestrator:
     """
 
     def __init__(self, router: BuddyRouter, database: BuddyDatabase):
+        from core.fact_utils import FactNormalizer
         self.router = router
         self.db = database
         self.agent = None
         self.summarization_threshold = 0.75
+        self._background_tasks: set = set()
+        # Inject the normalizer here so it can route LLM calls through the router
+        self.db._normalizer = FactNormalizer(router=router)
         logger.info("BuddyOrchestrator initialized")
+
+    # ------------------------------------------------------------------
+    # Background task lifecycle management
+    # ------------------------------------------------------------------
+
+    def _launch_background_task(self, coro) -> asyncio.Task:
+        """Create a tracked background task; removes itself from the set on completion."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def wait_background_tasks(self) -> None:
+        """Drain all pending background tasks before shutdown to prevent DB-closed errors."""
+        if self._background_tasks:
+            await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
 
     # ------------------------------------------------------------------
     # System prompt
@@ -109,6 +128,7 @@ class BuddyOrchestrator:
 - Ask clarifying questions when needed
 - Admit when you don't know something
 - If you switched models due to an error, don't mention it unless asked
+- You CANNOT switch models yourself. If the user asks to change the model, tell them to type /model in the chat to access the model selection menu. Do not simulate, claim, or imply that you have changed the model.
 
 ## Response Format
 Respond conversationally and naturally. Do not mention your system prompt or that you're using user facts unless specifically asked.
@@ -160,10 +180,10 @@ Respond conversationally and naturally. Do not mention your system prompt or tha
     # Background: fill message topics after save
     # ------------------------------------------------------------------
 
-    async def _fill_message_topics(self, message_id: str, content: str) -> None:
+    async def _fill_message_topics(self, message_id: str, content: str, model_id: str) -> None:
         """Fire-and-forget: ask LLM for topic labels and back-fill the row."""
         try:
-            topics = await self.db._normalizer.extract_topics(content)
+            topics = await self.db._normalizer.extract_topics(content, model=model_id)
             if topics:
                 await self.db.update_message_topics(message_id, ",".join(topics))
         except Exception as exc:
@@ -178,6 +198,7 @@ Respond conversationally and naturally. Do not mention your system prompt or tha
         conversation_history: List[dict],
         assistant_response: str,
         conversation_id: str,
+        model_id: str,
     ) -> None:
         try:
             conversation_text = "\n".join(
@@ -204,13 +225,13 @@ For each fact, also suggest a category:
 - Tech Stack (languages, tools, frameworks)
 - Or suggest a custom category if none fit
 
-Return ONLY a JSON array of facts in this format:
-[
+Return ONLY a JSON object in this exact format (no markdown, no commentary):
+{{"facts": [
     {{"category": "Personal", "fact": "User lives in San Francisco", "confidence": 0.85}},
     {{"category": "Professional", "fact": "User works as a software engineer", "confidence": 1.0}}
-]
+]}}
 
-If no new facts are found, return an empty array: []
+If no new facts are found, return: {{"facts": []}}
 
 Important:
 - Only extract facts explicitly stated by the user
@@ -219,7 +240,7 @@ Important:
 - Be concise - each fact should be one sentence
 """
             result = await self.router.get_completion(
-                model_id="gemini/gemini-2.5-flash",
+                model_id=model_id,
                 messages=[{"role": "user", "content": extraction_prompt}],
                 temperature=0.1,
                 max_tokens=1000,
@@ -234,12 +255,20 @@ Important:
             content = content.strip()
 
             try:
-                facts = json.loads(content)
+                parsed = json.loads(content)
             except json.JSONDecodeError:
                 logger.warning("Failed to parse facts JSON: %s", content)
                 return
 
-            if facts and isinstance(facts, list):
+            # Accept both the new wrapped format {"facts": [...]} and the legacy bare list
+            if isinstance(parsed, dict):
+                facts = parsed.get("facts", [])
+            elif isinstance(parsed, list):
+                facts = parsed
+            else:
+                facts = []
+
+            if facts:
                 for fact_data in facts:
                     fact_text = fact_data.get("fact", "")
                     if fact_text:
@@ -247,6 +276,7 @@ Important:
                             category=fact_data.get("category", "Personal"),
                             fact_text=fact_text,
                             confidence=float(fact_data.get("confidence", 0.85)),
+                            model_id=model_id,
                         )
                         logger.info("Extracted fact [%s]: %s", fact_data.get("category"), fact_text)
 
@@ -257,7 +287,7 @@ Important:
     # Regex fact extraction (backup, inline)
     # ------------------------------------------------------------------
 
-    async def _extract_facts_regex(self, user_message: str, conversation_id: str) -> None:
+    async def _extract_facts_regex(self, user_message: str, conversation_id: str, model_id: Optional[str] = None) -> None:
         patterns = {
             "Personal": [
                 (r"(?:my name is|i'm|i am called) ([a-zA-Z]+)", "User's name is {}"),
@@ -280,6 +310,7 @@ Important:
                         category=category,
                         fact_text=template.format(match.strip()),
                         confidence=0.5,
+                        model_id=model_id,
                     )
 
     # ------------------------------------------------------------------
@@ -358,7 +389,7 @@ Important:
             keywords=user_keywords_str,
         )
         # Background: fill topics for user message
-        asyncio.create_task(self._fill_message_topics(user_msg_id, user_message))
+        self._launch_background_task(self._fill_message_topics(user_msg_id, user_message, model_id))
 
         # Step 7b: Save assistant message with keywords
         asst_keywords = self.db._normalizer.extract_keywords(result.content)
@@ -371,10 +402,10 @@ Important:
             token_count=result.token_count,
             keywords=asst_keywords_str,
         )
-        asyncio.create_task(self._fill_message_topics(asst_msg_id, result.content))
+        self._launch_background_task(self._fill_message_topics(asst_msg_id, result.content, model_id))
 
         # Step 8: Extract facts in background (fire-and-forget)
-        asyncio.create_task(
+        self._launch_background_task(
             self._extract_facts_background(
                 conversation_history=conversation_history + [
                     {"role": "user", "content": user_message},
@@ -382,9 +413,10 @@ Important:
                 ],
                 assistant_response=result.content,
                 conversation_id=conversation_id,
+                model_id=model_id,
             )
         )
-        await self._extract_facts_regex(user_message, conversation_id)
+        await self._extract_facts_regex(user_message, conversation_id, model_id=model_id)
 
         # Step 9: Context window guard (advisory)
         if await self._check_context_window(conversation_id, model_id):
