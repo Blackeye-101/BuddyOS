@@ -105,13 +105,17 @@ SINGLETON_KEYS: frozenset[str] = frozenset(
 class FactNormalizer:
     """Converts fact text into deterministic snake_case keys for deduplication."""
 
+    def __init__(self, router=None):
+        # Optional BuddyRouter; when present LLM calls are routed through the
+        # full fallback chain instead of hitting litellm directly.
+        self._router = router
     def _slugify(self, text: str) -> str:
         text = text.lower().strip()
         text = re.sub(r"[\s\-]+", "_", text)
         text = re.sub(r"[^a-z0-9_]", "", text)
         return text.strip("_")[:80]
 
-    async def normalize(self, category: str, fact_text: str) -> str:
+    async def normalize(self, category: str, fact_text: str, model: Optional[str] = None) -> str:
         """
         Return a snake_case key for the given fact.
 
@@ -125,25 +129,41 @@ class FactNormalizer:
                     return self._slugify(template.format(self._slugify(m.group(1))))
                 return template
 
-        return await self._llm_normalize(category, fact_text)
+        return await self._llm_normalize(category, fact_text, model=model)
 
-    async def _llm_normalize(self, category: str, fact_text: str) -> str:
+    async def _llm_normalize(self, category: str, fact_text: str, model: Optional[str] = None) -> str:
         """Ask the LLM to produce a snake_case key for an unrecognised fact."""
+        effective_model = model or (self._router.ultimate_fallback if self._router else "gemini/gemini-2.5-flash")
         prompt = (
             f"Return ONLY a snake_case key (max 6 words, lowercase, underscores only) "
             f"that identifies the TYPE of information — not the value itself — "
             f'for this fact: "{fact_text}" in category "{category}". '
             f"Examples: personal_location, preference_music_genre, tech_stack_language. "
-            f"Output the key alone on a single line."
+            f"Output the key alone on a single line. Never leave the response empty; if unsure, return 'general_fact'."
         )
         try:
-            response = await litellm.acompletion(
-                model="gemini/gemini-2.5-flash",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=20,
-                temperature=0,
-            )
-            raw = response.choices[0].message.content.strip().splitlines()[0]
+            if self._router is not None:
+                result = await self._router.get_completion(
+                    model_id=effective_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=20,
+                    temperature=0,
+                )
+                lines = result.content.strip().splitlines()
+                if not lines:
+                    raise ValueError("Empty response from LLM")
+                raw = lines[0]
+            else:
+                response = await litellm.acompletion(
+                    model=effective_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=20,
+                    temperature=0,
+                )
+                lines = response.choices[0].message.content.strip().splitlines()
+                if not lines:
+                    raise ValueError("Empty response from LLM")
+                raw = lines[0]
             return self._slugify(raw)
         except Exception as exc:
             logger.warning("FactNormalizer LLM fallback failed: %s", exc)
@@ -181,26 +201,42 @@ class FactNormalizer:
                 break
         return list(seen.keys())
 
-    async def extract_topics(self, text: str) -> list[str]:
+    async def extract_topics(self, text: str, model: Optional[str] = None) -> list[str]:
         """
         Use the LLM to derive 1-3 high-level topic labels (snake_case).
 
         Falls back to the first two keywords on any error.
         """
+        effective_model = model or (self._router.ultimate_fallback if self._router else "gemini/gemini-2.5-flash")
         prompt = (
             "Return 1-3 comma-separated topic labels (lowercase snake_case, "
             "e.g. python_programming, travel_plans) that best describe the "
             f"subject of this message: \"{text}\". "
-            "Output labels only, nothing else."
+            "Output labels only, nothing else. Never leave the response empty; if unsure, return 'general'."
         )
         try:
-            response = await litellm.acompletion(
-                model="gemini/gemini-2.5-flash",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=30,
-                temperature=0,
-            )
-            raw = response.choices[0].message.content.strip().splitlines()[0]
+            if self._router is not None:
+                result = await self._router.get_completion(
+                    model_id=effective_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=30,
+                    temperature=0,
+                )
+                lines = result.content.strip().splitlines()
+                if not lines:
+                    raise ValueError("Empty response from LLM")
+                raw = lines[0]
+            else:
+                response = await litellm.acompletion(
+                    model=effective_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=30,
+                    temperature=0,
+                )
+                lines = response.choices[0].message.content.strip().splitlines()
+                if not lines:
+                    raise ValueError("Empty response from LLM")
+                raw = lines[0]
             return [self._slugify(t) for t in raw.split(",") if t.strip()][:3]
         except Exception as exc:
             logger.warning("FactNormalizer.extract_topics LLM failed: %s", exc)

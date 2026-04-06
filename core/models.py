@@ -177,7 +177,7 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
         ),
         # DeepSeek Free Models
         ModelInfo(
-            model_id="deepseek/deepseek-r1:free",
+            model_id="openrouter/deepseek/deepseek-r1:free",
             provider="openrouter",
             display_name="DeepSeek R1 (Free)",
             requires_key="OPENROUTER_API_KEY",
@@ -187,7 +187,7 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             max_tokens=32768  # 32K max output
         ),
         ModelInfo(
-            model_id="deepseek/deepseek-r1-distill-qwen-32b:free",
+            model_id="openrouter/deepseek/deepseek-r1-distill-qwen-32b:free",
             provider="openrouter",
             display_name="DeepSeek R1 Distill Qwen 32B (Free)",
             requires_key="OPENROUTER_API_KEY",
@@ -197,7 +197,7 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             max_tokens=16000  # 16K max output
         ),
         ModelInfo(
-            model_id="deepseek/deepseek-r1-distill-qwen-14b:free",
+            model_id="openrouter/deepseek/deepseek-r1-distill-qwen-14b:free",
             provider="openrouter",
             display_name="DeepSeek R1 Distill Qwen 14B (Free)",
             requires_key="OPENROUTER_API_KEY",
@@ -208,7 +208,7 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
         ),
         # Qwen Free Models
         ModelInfo(
-            model_id="qwen/qwen3-coder:free",
+            model_id="openrouter/qwen/qwen3-coder:free",
             provider="openrouter",
             display_name="Qwen3 Coder 480B (Free)",
             requires_key="OPENROUTER_API_KEY",
@@ -218,7 +218,7 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             max_tokens=16000  # 16K max output
         ),
         ModelInfo(
-            model_id="qwen/qwen3-next-80b-a3b-instruct:free",
+            model_id="openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
             provider="openrouter",
             display_name="Qwen3 Next 80B (Free)",
             requires_key="OPENROUTER_API_KEY",
