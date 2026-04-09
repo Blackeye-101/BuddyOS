@@ -10,7 +10,7 @@ ENV/
 env/
 
 # logs
-.logs/
+logs/
 
 # .github 
 .github/
