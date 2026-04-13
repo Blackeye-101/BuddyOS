@@ -32,5 +32,4 @@ logs
 .streamlit/
 
 # Data
-data/*.db
-data/*.duckdb
+data/
