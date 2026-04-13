@@ -149,10 +149,10 @@ class FactNormalizer:
                     max_tokens=20,
                     temperature=0,
                 )
-                lines = result.content.strip().splitlines()
-                if not lines:
+                raw_content = result.content
+                if not raw_content:
                     raise ValueError("Empty response from LLM")
-                raw = lines[0]
+                raw = raw_content.strip().splitlines()[0]
             else:
                 response = await litellm.acompletion(
                     model=effective_model,
@@ -160,10 +160,10 @@ class FactNormalizer:
                     max_tokens=20,
                     temperature=0,
                 )
-                lines = response.choices[0].message.content.strip().splitlines()
-                if not lines:
+                raw_content = response.choices[0].message.content
+                if not raw_content:
                     raise ValueError("Empty response from LLM")
-                raw = lines[0]
+                raw = raw_content.strip().splitlines()[0]
             return self._slugify(raw)
         except Exception as exc:
             logger.warning("FactNormalizer LLM fallback failed: %s", exc)
@@ -222,10 +222,10 @@ class FactNormalizer:
                     max_tokens=30,
                     temperature=0,
                 )
-                lines = result.content.strip().splitlines()
-                if not lines:
+                raw_content = result.content
+                if not raw_content:
                     raise ValueError("Empty response from LLM")
-                raw = lines[0]
+                raw = raw_content.strip().splitlines()[0]
             else:
                 response = await litellm.acompletion(
                     model=effective_model,
@@ -233,10 +233,10 @@ class FactNormalizer:
                     max_tokens=30,
                     temperature=0,
                 )
-                lines = response.choices[0].message.content.strip().splitlines()
-                if not lines:
+                raw_content = response.choices[0].message.content
+                if not raw_content:
                     raise ValueError("Empty response from LLM")
-                raw = lines[0]
+                raw = raw_content.strip().splitlines()[0]
             return [self._slugify(t) for t in raw.split(",") if t.strip()][:3]
         except Exception as exc:
             logger.warning("FactNormalizer.extract_topics LLM failed: %s", exc)
