@@ -7,6 +7,7 @@ This module manages two distinct storage systems:
 """
 
 import asyncio
+import logging
 import aiosqlite
 import duckdb
 import uuid
@@ -14,6 +15,8 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -74,6 +77,7 @@ class BuddyDatabase:
         self._sqlite_conn: Optional[aiosqlite.Connection] = None
         self._duckdb_conn: Optional[duckdb.DuckDBPyConnection] = None
         self._normalizer = None  # Injected by BuddyOrchestrator after init
+        self._vss_available: bool = False  # Set True after successful VSS load
     
     async def initialize(self):
         """Initialize both databases and create schemas."""
@@ -150,8 +154,20 @@ class BuddyDatabase:
         """Initialize DuckDB database with schema (wrapped in async)."""
         def _create_duckdb_schema():
             self._duckdb_conn = duckdb.connect(self.duckdb_path)
-            
-            # Create facts table
+
+            # ── VSS extension (vector similarity search) ────────────────
+            try:
+                self._duckdb_conn.execute("INSTALL vss;")
+                self._duckdb_conn.execute("LOAD vss;")
+                self._vss_available = True
+                logger.info("DuckDB VSS extension loaded.")
+            except Exception as exc:
+                self._vss_available = False
+                logger.warning(
+                    "DuckDB VSS unavailable — falling back to full fact load. Error: %s", exc
+                )
+
+            # ── Core facts table ────────────────────────────────────────
             self._duckdb_conn.execute("""
                 CREATE TABLE IF NOT EXISTS facts (
                     id VARCHAR PRIMARY KEY,
@@ -163,13 +179,21 @@ class BuddyDatabase:
                     is_active BOOLEAN DEFAULT TRUE
                 )
             """)
-            
-            # Create indexes
+
+            # Migration: add embedding column to existing databases
+            try:
+                self._duckdb_conn.execute(
+                    "ALTER TABLE facts ADD COLUMN IF NOT EXISTS embedding FLOAT[384]"
+                )
+            except Exception as exc:
+                logger.warning("Embedding column migration skipped: %s", exc)
+
+            # ── Scalar indexes ──────────────────────────────────────────
             self._duckdb_conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_facts_active 
                 ON facts(is_active, last_seen DESC)
             """)
-            
+
             self._duckdb_conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_facts_category 
                 ON facts(category, is_active)
@@ -179,7 +203,22 @@ class BuddyDatabase:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_key
                 ON facts(fact_key)
             """)
-        
+
+            # ── HNSW vector index ────────────────────────────────────────
+            if self._vss_available:
+                try:
+                    self._duckdb_conn.execute(
+                        "SET hnsw_enable_experimental_persistence = true;"
+                    )
+                    self._duckdb_conn.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_facts_embedding
+                        ON facts USING HNSW (embedding)
+                        WITH (metric = 'cosine')
+                    """)
+                    logger.info("HNSW index on facts.embedding ready.")
+                except Exception as exc:
+                    logger.warning("HNSW index creation skipped: %s", exc)
+
         # Wrap synchronous DuckDB in async
         await asyncio.to_thread(_create_duckdb_schema)
     
@@ -534,6 +573,10 @@ class BuddyDatabase:
         fact_key = await self._normalizer.normalize(category, fact_text, model=model_id)
         normalizer = self._normalizer  # capture for thread closure
 
+        # Generate embedding before entering the sync thread
+        from core.embeddings import generate_embedding_safe
+        embedding = await generate_embedding_safe(fact_text)
+
         def _upsert_fact() -> str:
             now = datetime.utcnow().isoformat()
 
@@ -546,24 +589,24 @@ class BuddyDatabase:
                 existing_id, existing_text, existing_conf = existing
                 if normalizer.is_contradiction(fact_key, existing_text, fact_text):
                     self._duckdb_conn.execute(
-                        "UPDATE facts SET fact_text = ?, confidence = 0.6, last_seen = ? WHERE id = ?",
-                        (fact_text, now, existing_id),
+                        "UPDATE facts SET fact_text = ?, confidence = 0.6, last_seen = ?, embedding = ? WHERE id = ?",
+                        (fact_text, now, embedding, existing_id),
                     )
                 else:
                     new_conf = min(existing_conf + 0.1, 1.0)
                     self._duckdb_conn.execute(
-                        "UPDATE facts SET confidence = ?, last_seen = ? WHERE id = ?",
-                        (new_conf, now, existing_id),
+                        "UPDATE facts SET confidence = ?, last_seen = ?, embedding = ? WHERE id = ?",
+                        (new_conf, now, embedding, existing_id),
                     )
                 return existing_id
 
             fact_id = str(uuid.uuid4())
             self._duckdb_conn.execute(
                 """
-                INSERT INTO facts (id, fact_key, category, fact_text, confidence, last_seen, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, TRUE)
+                INSERT INTO facts (id, fact_key, category, fact_text, confidence, last_seen, is_active, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, TRUE, ?)
                 """,
-                (fact_id, fact_key, category, fact_text, confidence, now),
+                (fact_id, fact_key, category, fact_text, confidence, now, embedding),
             )
             return fact_id
 
@@ -600,7 +643,80 @@ class BuddyDatabase:
             return facts
         
         return await asyncio.to_thread(_get_facts)
-    
+
+    async def get_relevant_facts(
+        self,
+        query_embedding: list,
+        limit: int = 5,
+    ) -> List[UserFact]:
+        """
+        Retrieve the most semantically relevant active facts using cosine similarity.
+
+        Falls back to recency-ordered full load when:
+        - VSS extension is not available, or
+        - No facts have embeddings yet.
+
+        Args:
+            query_embedding: 384-float list from core.embeddings.generate_embedding.
+            limit:           Maximum number of facts to return.
+
+        Returns:
+            List of UserFact objects sorted by relevance (most relevant first).
+        """
+        if not self._vss_available:
+            logger.debug("VSS unavailable — falling back to full fact load.")
+            all_facts = await self.get_user_facts(active_only=True)
+            return all_facts[:limit]
+
+        def _semantic_search() -> List[UserFact]:
+            try:
+                rows = self._duckdb_conn.execute(
+                    """
+                    SELECT id, category, fact_text, confidence, last_seen, is_active,
+                           array_cosine_similarity(embedding, ?::FLOAT[384]) AS similarity
+                    FROM facts
+                    WHERE is_active = TRUE AND embedding IS NOT NULL
+                    ORDER BY similarity DESC
+                    LIMIT ?
+                    """,
+                    [query_embedding, limit],
+                ).fetchall()
+
+                return [
+                    UserFact(
+                        id=row[0],
+                        category=row[1],
+                        fact_text=row[2],
+                        confidence=row[3],
+                        last_seen=row[4],
+                        is_active=row[5],
+                    )
+                    for row in rows
+                ]
+            except Exception as exc:
+                logger.warning(
+                    "Semantic search failed (%s) — falling back to recency order.", exc
+                )
+                rows = self._duckdb_conn.execute(
+                    """
+                    SELECT id, category, fact_text, confidence, last_seen, is_active
+                    FROM facts
+                    WHERE is_active = TRUE
+                    ORDER BY last_seen DESC
+                    LIMIT ?
+                    """,
+                    [limit],
+                ).fetchall()
+                return [
+                    UserFact(
+                        id=row[0], category=row[1], fact_text=row[2],
+                        confidence=row[3], last_seen=row[4], is_active=row[5],
+                    )
+                    for row in rows
+                ]
+
+        return await asyncio.to_thread(_semantic_search)
+
     async def get_facts_by_category(self, category: str) -> List[UserFact]:
         """
         Get facts filtered by category.

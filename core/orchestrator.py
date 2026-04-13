@@ -18,6 +18,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from core.database import BuddyDatabase, UserFact
+from core.embeddings import generate_embedding_safe
 from core.router import BuddyRouter
 
 
@@ -243,21 +244,26 @@ Important:
                 model_id=model_id,
                 messages=[{"role": "user", "content": extraction_prompt}],
                 temperature=0.1,
-                max_tokens=1000,
+                max_tokens=1500,
             )
 
-            content = result.content.strip()
-            for prefix in ("```json", "```"):
-                if content.startswith(prefix):
-                    content = content[len(prefix):]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
+            raw = result.content
+            if not raw:
+                return
+
+            # Extract the first JSON object or array from anywhere in the response
+            # (handles preamble text, markdown fences, and truncated wrappers)
+            import re as _re
+            json_match = _re.search(r'(\{.*\}|\[.*\])', raw, _re.DOTALL)
+            if not json_match:
+                logger.warning("No JSON found in facts extraction response: %s", raw[:200])
+                return
+            content = json_match.group(1).strip()
 
             try:
                 parsed = json.loads(content)
             except json.JSONDecodeError:
-                logger.warning("Failed to parse facts JSON: %s", content)
+                logger.warning("Failed to parse facts JSON: %s", content[:200])
                 return
 
             # Accept both the new wrapped format {"facts": [...]} and the legacy bare list
@@ -353,9 +359,14 @@ Important:
             conversation_id, query_keywords=query_keywords
         )
 
-        # Step 4: Load user facts
-        user_facts = await self.db.get_user_facts(active_only=True)
-        logger.info("Loaded %d user facts from DuckDB", len(user_facts))
+        # Step 4: Load user facts — semantic RAG when VSS is available
+        query_embedding = await generate_embedding_safe(user_message)
+        if query_embedding is not None and self.db._vss_available:
+            user_facts = await self.db.get_relevant_facts(query_embedding, limit=5)
+            logger.info("Loaded %d relevant facts via RAG from DuckDB", len(user_facts))
+        else:
+            user_facts = await self.db.get_user_facts(active_only=True)
+            logger.info("Loaded %d user facts (full load) from DuckDB", len(user_facts))
 
         # Step 5: Build dynamic system prompt
         system_prompt = self._build_system_prompt(user_facts=user_facts, current_model=model_id)
