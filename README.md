@@ -11,6 +11,7 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 - **Hybrid Persistence Layer**:
   - **SQLite** (`aiosqlite`): Transactional tracking of conversations, message history, timestamp updates, and token usage limits.
   - **DuckDB**: Analytical engine for lightning-fast retrieval of learned "User Facts".
+- **RAG-Powered Memory (Semantic Fact Retrieval)**: Buddy embeds every learned fact locally using `fastembed` (ONNX Runtime, no PyTorch required). At each turn, it runs a DuckDB VSS cosine-similarity search to inject only the top-5 most relevant facts into the system prompt — keeping context lean and precise.
 - **Continuous Learning (Automated Fact Extraction)**: Buddy constantly evaluates your conversations in the background. It extracts information about you (e.g., job, preferences, name) and stores them as active facts to customize future system prompts.
 - **Dynamic Context Window Management**: Constantly monitors context tokens and triggers summarization when the context threshold (~75%) is reached, preventing the LLM from forgetting the start of a long conversation.
 - **Interactive CLI**: Comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`) to manage your Buddy context easily.
@@ -19,7 +20,8 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 
 - **Language**: Python 3.12+
 - **Frameworks**: Pydantic-AI (Agent logic), LiteLLM (Routing/Tokenization)
-- **Database**: SQLite (`aiosqlite`), DuckDB
+- **Database**: SQLite (`aiosqlite`), DuckDB + VSS extension (HNSW vector index)
+- **Embeddings**: [`fastembed`](https://github.com/qdrant/fastembed) — `BAAI/bge-small-en-v1.5` (384-dim, ONNX Runtime, no PyTorch)
 - **Frontend (Planned)**: Streamlit
 
 ## 🚀 Getting Started
@@ -50,7 +52,19 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
    pip install -e .
    ```
 
-4. Create a `.env` file in the root directory and add your API keys:
+4. **Embedding model** (for RAG memory):
+
+   BuddyOS uses [`BAAI/bge-small-en-v1.5`](https://huggingface.co/Qdrant/bge-small-en-v1.5-onnx-Q) (~66 MB, ONNX format) for local semantic search. The model is **downloaded automatically on first run** via `fastembed` and cached to `data/fastembed_cache/`. No manual step is required.
+
+   If automatic download fails (e.g., restricted network), download it manually:
+
+   ```bash
+   python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='data/fastembed_cache')"
+   ```
+
+   > **Note:** The model cache is excluded from version control (`.gitignore`). Each developer downloads it once on first run.
+
+5. Create a `.env` file in the root directory and add your API keys:
    ```env
    GEMINI_API_KEY=your_gemini_api_key_here
    OPENAI_API_KEY=your_openai_api_key_here
@@ -80,8 +94,9 @@ Inside the chat loop, you can use the following commands:
 ```
 buddy-os/
 ├── agents/             # Pydantic-AI orchestrator definitions (Buddy agent)
-├── core/               # Core engine (LiteLLM router, Hybrid DB manager)
+├── core/               # Core engine (LiteLLM router, Hybrid DB manager, embeddings)
 ├── data/               # Local persistence layer (.db and .duckdb generated here)
+│   └── fastembed_cache/  # Auto-downloaded ONNX embedding model (gitignored)
 ├── ui/                 # Streamlit UI logic (WIP)
 ├── main.py             # CLI Entry point
 └── pyproject.toml      # Project definitions & dependencies
