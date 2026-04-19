@@ -35,11 +35,12 @@ class RouterError(Exception):
 @dataclass
 class CompletionResult:
     """Result of a completion request."""
-    content: str
+    content: Optional[str]
     model_used: str
     fallback_occurred: bool = False
     fallback_from: Optional[str] = None
     token_count: int = 0
+    tool_calls: Optional[List[Any]] = None
 
 
 class BuddyRouter:
@@ -102,7 +103,7 @@ class BuddyRouter:
             except Exception as e:
                 logger.warning(f"Token counting failed for {model_id}: {e}, using estimate")
                 # Fallback: rough estimate (1 token ≈ 0.75 words)
-                tokens = int(len(content.split()) * 1.3)
+                tokens = int(len((content or "").split()) * 1.3)
                 total_tokens += tokens
         
         # Check against context window
@@ -259,14 +260,16 @@ class BuddyRouter:
                     **kwargs
                 )
                 
-                # Extract content
-                content = response.choices[0].message.content
+                message = response.choices[0].message
+                content = message.content
+                tool_calls = getattr(message, "tool_calls", None)
                 
                 # Calculate output tokens
                 try:
-                    output_tokens = token_counter(model=model_id, text=content)
-                except Exception:
-                    output_tokens = int(len(content.split()) * 1.3)
+                    output_tokens = token_counter(model=model_id, messages=[message.model_dump()])
+                except Exception as eval_exc:
+                    logger.warning(f"Token counting failed for {model_id}: {eval_exc}, using estimate")
+                    output_tokens = int(len((content or "").split()) * 1.3)
                 
                 logger.info(f"Completion successful with {model_id}")
                 
@@ -274,7 +277,8 @@ class BuddyRouter:
                     content=content,
                     model_used=model_id,
                     fallback_occurred=False,
-                    token_count=output_tokens
+                    token_count=output_tokens,
+                    tool_calls=tool_calls
                 )
                 
             except litellm.exceptions.RateLimitError as e:
@@ -327,12 +331,15 @@ class BuddyRouter:
                     **kwargs
                 )
                 
-                content = response.choices[0].message.content
+                message = response.choices[0].message
+                content = message.content
+                tool_calls = getattr(message, "tool_calls", None)
                 
                 try:
-                    output_tokens = token_counter(model=fallback_model, text=content)
-                except Exception:
-                    output_tokens = int(len(content.split()) * 1.3)
+                    output_tokens = token_counter(model=fallback_model, messages=[message.model_dump()])
+                except Exception as eval_exc:
+                    logger.warning(f"Token counting failed for {fallback_model}: {eval_exc}, using estimate")
+                    output_tokens = int(len((content or "").split()) * 1.3)
                 
                 logger.info(f"Fallback successful with {fallback_model}")
                 
@@ -341,7 +348,8 @@ class BuddyRouter:
                     model_used=fallback_model,
                     fallback_occurred=True,
                     fallback_from=original_model_id,
-                    token_count=output_tokens
+                    token_count=output_tokens,
+                    tool_calls=tool_calls
                 )
                 
             except Exception as e:
