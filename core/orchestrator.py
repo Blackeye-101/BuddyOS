@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from core.database import BuddyDatabase, UserFact
 from core.embeddings import generate_embedding_safe
 from core.router import BuddyRouter
+from core.tools import get_tools_for_agent, execute_tool
 
 
 # Logging is configured centrally in main.py
@@ -130,6 +131,7 @@ class BuddyOrchestrator:
 - Admit when you don't know something
 - If you switched models due to an error, don't mention it unless asked
 - You CANNOT switch models yourself. If the user asks to change the model, tell them to type /model in the chat to access the model selection menu. Do not simulate, claim, or imply that you have changed the model.
+- You have the ability to search the web using DuckDuckGo. Use the `web_search` tool for real-time information, recent events, weather, or facts you are not completely certain about. Let the tool provide up-to-date facts before you give your final answer.
 
 ## Response Format
 Respond conversationally and naturally. Do not mention your system prompt or that you're using user facts unless specifically asked.
@@ -377,18 +379,67 @@ Important:
             *conversation_history,
             {"role": "user", "content": user_message},
         ]
-        result = await self.router.get_completion(
-            model_id=model_id,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=2000,
-        )
+        
+        tools = get_tools_for_agent("buddy")
+        
+        result_content = ""
+        result_model_used = model_id
+        result_token_count = 0
+        fallback_occurred = False
+        fallback_from = None
+        
+        while True:
+            # Add tools to the router call if they exist
+            kwargs = {}
+            if tools:
+                kwargs["tools"] = tools
+                
+            result = await self.router.get_completion(
+                model_id=model_id,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=2000,
+                **kwargs
+            )
+            
+            result_model_used = result.model_used
+            result_token_count += result.token_count
+            if result.fallback_occurred:
+                fallback_occurred = True
+                fallback_from = result.fallback_from
+                
+            if result.tool_calls:
+                # The LLM wants to use a tool
+                messages.append({
+                    "role": "assistant",
+                    "content": result.content,
+                    "tool_calls": result.tool_calls
+                })
+                
+                for tool_call in result.tool_calls:
+                    function_name = tool_call.function.name
+                    function_args = tool_call.function.arguments
+                    logger.info(f"LLM executing tool: {function_name}")
+                    
+                    # Execute the tool
+                    tool_result_str = execute_tool(function_name, function_args)
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": function_name,
+                        "content": tool_result_str
+                    })
+                # Loop back to let the LLM use the tool outputs to form the final answer
+            else:
+                result_content = result.content
+                break
 
         # Step 7a: Save user message with keywords
         try:
             user_tokens = token_counter(model=model_id, text=user_message)
         except Exception:
-            user_tokens = int(len(user_message.split()) * 1.3)
+            user_tokens = int(len((user_message or "").split()) * 1.3)
 
         user_keywords_str = f",{','.join(query_keywords)}," if query_keywords else ""
         user_msg_id = await self.db.save_message(
@@ -403,26 +454,26 @@ Important:
         self._launch_background_task(self._fill_message_topics(user_msg_id, user_message, model_id))
 
         # Step 7b: Save assistant message with keywords
-        asst_keywords = self.db._normalizer.extract_keywords(result.content)
+        asst_keywords = self.db._normalizer.extract_keywords(result_content)
         asst_keywords_str = f",{','.join(asst_keywords)}," if asst_keywords else ""
         asst_msg_id = await self.db.save_message(
             conversation_id=conversation_id,
             role="assistant",
-            content=result.content,
-            model_id=result.model_used,
-            token_count=result.token_count,
+            content=result_content,
+            model_id=result_model_used,
+            token_count=result_token_count,
             keywords=asst_keywords_str,
         )
-        self._launch_background_task(self._fill_message_topics(asst_msg_id, result.content, model_id))
+        self._launch_background_task(self._fill_message_topics(asst_msg_id, result_content, model_id))
 
         # Step 8: Extract facts in background (fire-and-forget)
         self._launch_background_task(
             self._extract_facts_background(
                 conversation_history=conversation_history + [
                     {"role": "user", "content": user_message},
-                    {"role": "assistant", "content": result.content},
+                    {"role": "assistant", "content": result_content},
                 ],
-                assistant_response=result.content,
+                assistant_response=result_content,
                 conversation_id=conversation_id,
                 model_id=model_id,
             )
@@ -434,12 +485,12 @@ Important:
             logger.warning("⚠️ Context window approaching limit.")
 
         return OrchestratorResponse(
-            response=result.content,
+            response=result_content,
             conversation_id=conversation_id,
             extracted_facts=[],
-            model_used=result.model_used,
-            fallback_occurred=result.fallback_occurred,
-            fallback_from=result.fallback_from,
+            model_used=result_model_used,
+            fallback_occurred=fallback_occurred,
+            fallback_from=fallback_from,
         )
 
     async def start_new_conversation(self, model_id: str, title: Optional[str] = None) -> str:

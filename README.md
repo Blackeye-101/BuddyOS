@@ -14,12 +14,14 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 - **RAG-Powered Memory (Semantic Fact Retrieval)**: Buddy embeds every learned fact locally using `fastembed` (ONNX Runtime, no PyTorch required). At each turn, it runs a DuckDB VSS cosine-similarity search to inject only the top-5 most relevant facts into the system prompt — keeping context lean and precise.
 - **Continuous Learning (Automated Fact Extraction)**: Buddy constantly evaluates your conversations in the background. It extracts information about you (e.g., job, preferences, name) and stores them as active facts to customize future system prompts.
 - **Dynamic Context Window Management**: Constantly monitors context tokens and triggers summarization when the context threshold (~75%) is reached, preventing the LLM from forgetting the start of a long conversation.
+- **Real-Time Web Search & Tool Calling**: Buddy is equipped with an integrated web search tool using DuckDuckGo (`ddgs`). When asked about recent events, current stock prices, or unknown facts, it dynamically pauses the conversation, searches the web, and integrates the live results into its final answer seamlessly.
 - **Interactive CLI**: Comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`) to manage your Buddy context easily.
 
 ## 🛠 Tech Stack
 
 - **Language**: Python 3.12+
 - **Frameworks**: Pydantic-AI (Agent logic), LiteLLM (Routing/Tokenization)
+- **Tools Integrations**: `ddgs` (DuckDuckGo Search)
 - **Database**: SQLite (`aiosqlite`), DuckDB + VSS extension (HNSW vector index)
 - **Embeddings**: [`fastembed`](https://github.com/qdrant/fastembed) — `BAAI/bge-small-en-v1.5` (384-dim, ONNX Runtime, no PyTorch)
 - **Frontend (Planned)**: Streamlit
@@ -95,6 +97,10 @@ Inside the chat loop, you can use the following commands:
 buddy-os/
 ├── agents/             # Pydantic-AI orchestrator definitions (Buddy agent)
 ├── core/               # Core engine (LiteLLM router, Hybrid DB manager, embeddings)
+│   ├── orchestrator.py   # Main Pydantic-AI orchestrator logic
+│   ├── router.py         # Multi-model router with tool & fallback mechanisms
+│   ├── tools.py          # Extensible tool registry & duckduckgo web_search implementation
+│   └── database.py       # DuckDB & SQLite persistence logic
 ├── data/               # Local persistence layer (.db and .duckdb generated here)
 │   └── fastembed_cache/  # Auto-downloaded ONNX embedding model (gitignored)
 ├── ui/                 # Streamlit UI logic (WIP)
