@@ -7,6 +7,7 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 
 ## ✨ Key Features
 
+- **Robust Tool Orchestration**: Designed with `max_steps` loop constraints and explicit null-type handling to gracefully prevent infinite tool-calling loops, especially when using complex models like GPT-5.
 - **Model-Agnostic Routing**: Powered by [LiteLLM](https://github.com/BerriAI/litellm), BuddyOS can discover available models dynamically based on your environment keys. It supports automated token counting and a **graceful fallback chain** (if one model goes down, it switches to the next available).
 - **Hybrid Persistence Layer**:
   - **SQLite** (`aiosqlite`): Transactional tracking of conversations, message history, timestamp updates, and token usage limits.
@@ -14,7 +15,7 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 - **RAG-Powered Memory (Semantic Fact Retrieval)**: Buddy embeds every learned fact locally using `fastembed` (ONNX Runtime, no PyTorch required). At each turn, it runs a DuckDB VSS cosine-similarity search to inject only the top-5 most relevant facts into the system prompt — keeping context lean and precise.
 - **Continuous Learning (Automated Fact Extraction)**: Buddy constantly evaluates your conversations in the background. It extracts information about you (e.g., job, preferences, name) and stores them as active facts to customize future system prompts.
 - **Dynamic Context Window Management**: Constantly monitors context tokens and triggers summarization when the context threshold (~75%) is reached, preventing the LLM from forgetting the start of a long conversation.
-- **Real-Time Web Search & Tool Calling**: Buddy is equipped with an integrated web search tool using DuckDuckGo (`ddgs`). When asked about recent events, current stock prices, or unknown facts, it dynamically pauses the conversation, searches the web, and integrates the live results into its final answer seamlessly.
+- **Real-Time Web Search & Tool Calling**: Buddy is equipped with an integrated web search tool using DuckDuckGo (`ddgs`) and an academic search tool using ArXiv (with advanced XML parsing and robust network timeouts). When asked about recent events or complex academic topics, it dynamically pauses the conversation, searches the web or literature, and integrates the live results into its final answer seamlessly.
 - **Interactive CLI**: Comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`) to manage your Buddy context easily.
 
 ## 🛠 Tech Stack
