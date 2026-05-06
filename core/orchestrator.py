@@ -117,6 +117,27 @@ class BuddyOrchestrator:
         
         logger.info("Supervisor Orchestrator initialized")
 
+    def run_agent_sync(self, target_agent: str, prompt: str) -> str:
+        """Synchronous wrapper to run an agent from a tool."""
+        logger.info(f"Handoff from tool to agent: {target_agent}")
+        agent = getattr(self, f"{target_agent}_agent", None)
+        if not agent:
+            return f"Agent {target_agent} not found."
+            
+        messages = [{"role": "user", "content": prompt}]
+        # Try to safely execute the async run method
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            future = asyncio.run_coroutine_threadsafe(
+                agent.run(messages, "gemini/gemini-2.5-flash"), loop
+            )
+            result = future.result(timeout=60)
+            return result[0]
+        except RuntimeError:
+            result = asyncio.run(agent.run(messages, "gemini/gemini-2.5-flash"))
+            return result[0]
+
     def _launch_background_task(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._background_tasks.add(task)
@@ -156,7 +177,8 @@ class BuddyOrchestrator:
 - Use user facts naturally when relevant to the conversation
 - Be friendly, concise, and helpful
 - Ask clarifying questions when needed
-- You have the ability to search the web using DuckDuckGo. Use the web_search tool for real-time information, recent events, weather, or facts you are not completely certain about. Let the tool provide up-to-date facts before you give your final answer.
+- You have the ability to search the web using duckduckgo. Use the web_search tool for real-time information.
+- IMPORTANT DELEGATION: If the user asks for rigorously peer-reviewed academic papers or deeply academic topics, you MUST use the `delegate_to_researcher_for_academic` tool to hand off the question to the Researcher agent.
 """
 
     def _build_researcher_prompt(self) -> str:
@@ -164,7 +186,7 @@ class BuddyOrchestrator:
 
 ## Instructions & Guardrails
 - **Zero Hallucination Strictness:** NEVER invent or guess papers, authors, publication years, or DOIs. If no papers are found via tools, state that explicitly.
-- **Strict Tool Reliance:** You must rely entirely on rxiv_search for academic facts.
+- **Strict Tool Reliance:** You must rely entirely on `arxiv_search` for academic facts.
 - **Delegation:** Use delegate_to_buddy_for_web_search ONLY when the user asks for general web information, recent news, stock prices, or events not fit for ArXiv.
 - **Mandatory Inline Citations:** Every academic claim must be cited with Title, Primary Author, Year, and a link.
 - **Objectivity & Limitations:** Maintain an objective, academic tone.
