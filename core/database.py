@@ -542,6 +542,49 @@ class BuddyDatabase:
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row[0] else 0
+
+    async def get_oldest_messages(self, conversation_id: str, limit: int) -> List[Message]:
+        """
+        Get the oldest messages in a conversation.
+        Useful for context window summarization.
+        """
+        async with self._sqlite_conn.execute(
+            """
+            SELECT id, conversation_id, role, content, model_id, 
+                   token_count, created_at, keywords, topics
+            FROM messages 
+            WHERE conversation_id = ? 
+            ORDER BY created_at ASC 
+            LIMIT ?
+            """,
+            (conversation_id, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [Message(
+                id=row[0],
+                conversation_id=row[1],
+                role=row[2],
+                content=row[3],
+                model_id=row[4],
+                token_count=row[5],
+                created_at=row[6],
+                keywords=row[7],
+                topics=row[8]
+            ) for row in rows]
+
+    async def delete_messages(self, message_ids: List[str]) -> None:
+        """
+        Delete a list of messages by ID.
+        """
+        if not message_ids:
+            return
+            
+        placeholders = ",".join("?" for _ in message_ids)
+        await self._sqlite_conn.execute(
+            f"DELETE FROM messages WHERE id IN ({placeholders})",
+            message_ids
+        )
+        await self._sqlite_conn.commit()
     
     # ============================================
     # User Facts Methods (DuckDB - Async Wrapped)

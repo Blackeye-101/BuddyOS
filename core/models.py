@@ -65,6 +65,16 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             context_window=200000,  # 200K tokens
             max_tokens=16000  # 16K max output
         ),
+        ModelInfo(
+            model_id="claude-3-5-haiku-20241022",
+            provider="anthropic",
+            display_name="Claude 3.5 Haiku",
+            requires_key="ANTHROPIC_API_KEY",
+            description="Fast and cost-effective Claude 3.5 variant",
+            tier="paid",
+            context_window=200000,  # 200K tokens
+            max_tokens=8192  # 8K max output
+        ),
     ],
     "openai": [
         ModelInfo(
@@ -144,7 +154,7 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
     ],
     "groq": [
         ModelInfo(
-            model_id="groq/gpt-oss-120b",
+            model_id="groq/openai/gpt-oss-120b",
             provider="groq",
             display_name="GPT-OSS-120B",
             requires_key="GROQ_API_KEY",
@@ -154,11 +164,11 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             max_tokens=8192  # 8K max output (estimated)
         ),
         ModelInfo(
-            model_id="groq/llama-4-70b",
+            model_id="groq/meta-llama/llama-4-scout-17b-16e-instruct",
             provider="groq",
-            display_name="Llama 4 70B",
+            display_name="Llama 4 Scout 17B",
             requires_key="GROQ_API_KEY",
-            description="Meta's Llama 4 on Groq",
+            description="Meta's Llama 4 Scout on Groq",
             tier="paid",
             context_window=131072,  # 131K tokens (estimated)
             max_tokens=8192  # 8K max output (estimated)
