@@ -197,12 +197,72 @@ class BuddyOrchestrator:
             conversation_id, query_keywords=query_keywords, tier1_limit=5, token_budget=1000
         )
 
+    async def _summarize_oldest_context(self, conversation_id: str, model_id: str) -> None:
+        """
+        Summarizes the oldest 50% of the messages to save tokens.
+        """
+        messages = await self.db.get_conversation_history(conversation_id)
+        if len(messages) <= 4:
+            return
+
+        oldest_messages = await self.db.get_oldest_messages(conversation_id, limit=len(messages) // 2)
+        if not oldest_messages:
+            return
+            
+        fast_model = self.router.get_fast_model_for_provider(model_id)
+        
+        text_to_summarize = "\n".join([f"{msg.role}: {msg.content}" for msg in oldest_messages if msg.role != "system"])
+        
+        prompt = f"""Summarize the following conversation history chronologically. 
+        Focus on the main topics, facts exchanged, and key decisions.
+        Keep it dense and factual.
+        
+        History:
+        {text_to_summarize}
+        """
+        
+        try:
+            result = await self.router.get_completion(
+                model_id=fast_model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000
+            )
+            
+            summary = result.content
+            
+            message_ids_to_delete = [msg.id for msg in oldest_messages if msg.role != "system"]
+            await self.db.delete_messages(message_ids_to_delete)
+            
+            from litellm import token_counter
+            try:
+                summary_tokens = token_counter(model=fast_model, text=summary)
+            except Exception:
+                summary_tokens = int(len((summary or "").split()) * 1.3)
+                
+            await self.db.save_message(
+                conversation_id=conversation_id,
+                role="system",
+                content=f"[SYSTEM MEMORY: Condensed history of earlier conversation]\n{summary}",
+                model_id=fast_model,
+                token_count=summary_tokens
+            )
+            
+            logger.info(f"Summarized {len(message_ids_to_delete)} messages into {summary_tokens} tokens using {fast_model}")
+            
+        except Exception as e:
+            logger.error(f"Failed to summarize context: {e}")
+
     async def _check_context_window(self, conversation_id: str, model_id: str) -> bool:
         total_tokens = await self.db.get_conversation_token_count(conversation_id)
         model_info = self.router.get_model_info(model_id)
-        if not model_info: return False
+        if not model_info or not model_info.context_window: 
+            return False
+            
         if total_tokens >= model_info.context_window * self.summarization_threshold:
             logger.warning("Context approaching limit.")
+            self._launch_background_task(
+                self._summarize_oldest_context(conversation_id, model_id)
+            )
             return True
         return False
 

@@ -141,7 +141,27 @@ class BuddyRouter:
             return None
         
         return os.getenv(env_var)
-    
+
+    def get_fast_model_for_provider(self, active_model_id: str) -> str:
+        """
+        Map a premium model to a cheaper/faster equivalent from the same provider for background tasks.
+        """
+        model_info = get_model_by_id(active_model_id)
+        if not model_info:
+            return active_model_id
+            
+        provider = model_info.provider
+        if provider == "openai":
+            return "gpt-4o-mini"
+        elif provider == "anthropic":
+            return "claude-3-5-haiku-20241022"
+        elif provider == "google":
+            return "gemini/gemini-2.5-flash"
+        elif provider == "groq":
+            return "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+        
+        return active_model_id
+
     def _find_free_model_same_provider(self, original_model_id: str) -> Optional[str]:
         """
         Find a free model from the same provider.
