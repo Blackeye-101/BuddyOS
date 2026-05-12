@@ -5,7 +5,7 @@ import re
 from typing import List, Optional
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.database import BuddyDatabase, UserFact
 from core.embeddings import generate_embedding_safe
@@ -27,6 +27,15 @@ class OrchestratorResponse(BaseModel):
     model_used: str
     fallback_occurred: bool = False
     fallback_from: Optional[str] = None
+
+
+class FactExtractionItem(BaseModel):
+    category: str = Field(description="The general category of the fact, e.g., 'Personal', 'Preferences', 'Pets', etc.")
+    fact_text: str = Field(description="The actual fact text")
+
+class FactExtractionSchema(BaseModel):
+    add_facts: List[FactExtractionItem] = Field(default_factory=list, description="New facts discovered in the user's message")
+    deactivate_fact_ids: List[str] = Field(default_factory=list, description="UUIDs of existing facts that are explicitly contradicted and should be removed")
 
 
 class BaseAgent:
@@ -274,11 +283,74 @@ class BuddyOrchestrator:
         except Exception:
             pass
 
-    async def _extract_facts_background(self, conversation_history, assistant_response, conversation_id, model_id):
-        pass # Simplified for brevity, same logic as before or skipped to avoid clutter. 
-        # (It's better to keep it, but for our goal we can just let regex do it if needed).
-        # Actually I will keep it empty but keep regex to avoid the background task failing since I truncated it.
-        # It's a POC for the researcher.
+    async def _extract_facts_background(self, user_message: str, model_id: str):
+        try:
+            # 1. Contextual Retrieval
+            query_embedding = await generate_embedding_safe(user_message)
+            if query_embedding is None or not self.db._vss_available:
+                return
+
+            existing_facts = await self.db.get_relevant_facts(query_embedding, limit=10)
+            
+            # Format existing facts for the prompt
+            facts_context = ""
+            if existing_facts:
+                facts_context = "### Existing Facts in Database:\n"
+                for fact in existing_facts:
+                    facts_context += f"- ID: {fact.id} | Category: {fact.category} | Fact: {fact.fact_text}\n"
+            else:
+                facts_context = "No existing relevant facts in database.\n"
+
+            # 2. Dynamic Model Selection
+            fast_model = self.router.get_fast_model_for_provider(model_id)
+
+            # 3. LLM Evaluation
+            prompt = f"""You are BuddyOS's Memory Extractor.
+Analyze the user's latest statement and extract any new, meaningful facts, preferences, or personal details to remember. 
+If the user's new statement explicitly contradicts and invalidates any of the 'Existing Facts', output the UUID of that existing fact in 'deactivate_fact_ids'.
+
+CRITICAL RULES FOR DEACTIVATING FACTS:
+1. DO NOT deactivate past historical events just because current circumstances changed (e.g., past pets or jobs remain true historical facts, even if the user gets a new pet or job).
+2. DO NOT deactivate future plans unless the user EXPLICITLY cancels or abandons them. (e.g., getting a Cat today does not cancel a plan to get a Dog in the future).
+3. Only deactivate a fact if the new statement represents a direct, mutually exclusive contradiction of a present-state fact (e.g., "I actually hate apples" contradicts "I love apples").
+
+Otherwise, if elements are entirely new, add them as 'add_facts'. Treat implicit overlaps flexibly.
+
+### User Statement:
+"{user_message}"
+
+{facts_context}
+"""
+
+            result = await self.router.get_completion(
+                model_id=fast_model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format=FactExtractionSchema,
+                max_tokens=1000
+            )
+
+            # 4. Execution
+            if not result.content:
+                return
+
+            # LiteLLM handles Pydantic outputs, so result.content is a JSON string
+            extracted_data = json.loads(result.content)
+            
+            for deactivated_id in extracted_data.get("deactivate_fact_ids", []):
+                logger.info(f"Deactivating contradicted fact ID: {deactivated_id}")
+                await self.db.deactivate_fact(deactivated_id)
+                
+            for new_fact in extracted_data.get("add_facts", []):
+                logger.info(f"Adding new user fact via LLM: {new_fact['fact_text']}")
+                await self.db.save_user_fact(
+                    category=new_fact["category"],
+                    fact_text=new_fact["fact_text"],
+                    confidence=0.5,
+                    model_id=fast_model
+                )
+
+        except Exception as e:
+            logger.error(f"Background Fact Extraction failed: {e}")
 
     async def _extract_facts_regex(self, user_message: str, conversation_id: str, model_id: Optional[str] = None) -> None:
         patterns = {
@@ -326,7 +398,7 @@ Respond with ONLY the word 'academic' or 'general'."""
         else:
             query_embedding = await generate_embedding_safe(user_message)
             if query_embedding is not None and self.db._vss_available:
-                user_facts = await self.db.get_relevant_facts(query_embedding, limit=5)
+                user_facts = await self.db.get_relevant_facts(query_embedding, limit=10)
             else:
                 user_facts = await self.db.get_user_facts(active_only=True)
             system_prompt = self._build_buddy_prompt(user_facts, model_id)
@@ -351,6 +423,10 @@ Respond with ONLY the word 'academic' or 'general'."""
         )
 
         await self._extract_facts_regex(user_message, conversation_id, model_id=model_id)
+        
+        # Launch LLM fact extraction as a background task to avoid blocking the reply
+        self._launch_background_task(self._extract_facts_background(user_message, model_id))
+        
         await self._check_context_window(conversation_id, model_id)
 
         return OrchestratorResponse(

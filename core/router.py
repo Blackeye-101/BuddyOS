@@ -145,10 +145,14 @@ class BuddyRouter:
     def get_fast_model_for_provider(self, active_model_id: str) -> str:
         """
         Map a premium model to a cheaper/faster equivalent from the same provider for background tasks.
+        If the active model is free, default to gemini-2.5-flash for reliability.
         """
         model_info = get_model_by_id(active_model_id)
         if not model_info:
             return active_model_id
+            
+        if model_info.tier == "free":
+            return "gemini/gemini-2.5-flash"
             
         provider = model_info.provider
         if provider == "openai":

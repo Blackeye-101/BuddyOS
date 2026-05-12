@@ -76,6 +76,7 @@ class BuddyDatabase:
         self.duckdb_path = duckdb_path
         self._sqlite_conn: Optional[aiosqlite.Connection] = None
         self._duckdb_conn: Optional[duckdb.DuckDBPyConnection] = None
+        self._duckdb_lock = asyncio.Lock()
         self._normalizer = None  # Injected by BuddyOrchestrator after init
         self._vss_available: bool = False  # Set True after successful VSS load
     
@@ -220,7 +221,8 @@ class BuddyDatabase:
                     logger.warning("HNSW index creation skipped: %s", exc)
 
         # Wrap synchronous DuckDB in async
-        await asyncio.to_thread(_create_duckdb_schema)
+        async with self._duckdb_lock:
+            await asyncio.to_thread(_create_duckdb_schema)
     
     # ============================================
     # Conversation Methods (SQLite - Async)
@@ -598,22 +600,17 @@ class BuddyDatabase:
         model_id: Optional[str] = None,
     ) -> str:
         """
-        Save a user fact to DuckDB using an UPSERT pattern keyed on fact_key.
-
-        - New fact → INSERT.
-        - Duplicate fact (same key, same text) → increment confidence (+0.1, max 1.0).
-        - Contradiction (same key, different text) → overwrite text, reset confidence to 0.6.
-
-        Args:
-            category: Fact category (Personal, Professional, Preferences, Tech Stack, or dynamic)
-            fact_text: The actual fact
-            confidence: Initial confidence score (0.0 to 1.0)
-            model_id: Active model to use for LLM-based key normalisation (avoids hardcoded defaults)
-
-        Returns:
-            fact_id: UUID of the affected row
+        Save a user fact to DuckDB.
+        Generates a unique fact_key via UUID to ensure we avoid DuckDB collision constraints,
+        allowing the system to store multiple facts of the same category.
         """
-        fact_key = await self._normalizer.normalize(category, fact_text, model=model_id)
+        import uuid
+        from datetime import datetime
+        
+        # Generate a unique programmatic ID instead of relying on unreliable LLM categorizations
+        safe_cat = "".join(c if c.isalnum() else "_" for c in category.lower())
+        fact_key = f"{safe_cat}_{uuid.uuid4().hex[:8]}"
+        
         normalizer = self._normalizer  # capture for thread closure
 
         # Generate embedding before entering the sync thread
@@ -653,7 +650,9 @@ class BuddyDatabase:
             )
             return fact_id
 
-        return await asyncio.to_thread(_upsert_fact)
+        async with self._duckdb_lock:
+
+            return await asyncio.to_thread(_upsert_fact)
     
     async def get_user_facts(self, active_only: bool = True) -> List[UserFact]:
         """
@@ -685,7 +684,9 @@ class BuddyDatabase:
                 ))
             return facts
         
-        return await asyncio.to_thread(_get_facts)
+        async with self._duckdb_lock:
+        
+            return await asyncio.to_thread(_get_facts)
 
     async def get_relevant_facts(
         self,
@@ -758,7 +759,9 @@ class BuddyDatabase:
                     for row in rows
                 ]
 
-        return await asyncio.to_thread(_semantic_search)
+        async with self._duckdb_lock:
+
+            return await asyncio.to_thread(_semantic_search)
 
     async def get_facts_by_category(self, category: str) -> List[UserFact]:
         """
@@ -793,7 +796,9 @@ class BuddyDatabase:
                 ))
             return facts
         
-        return await asyncio.to_thread(_get_by_category)
+        async with self._duckdb_lock:
+        
+            return await asyncio.to_thread(_get_by_category)
     
     async def update_fact_confidence(self, fact_id: str, new_confidence: float):
         """
@@ -809,7 +814,9 @@ class BuddyDatabase:
                 (new_confidence, datetime.utcnow().isoformat(), fact_id)
             )
         
-        await asyncio.to_thread(_update)
+        async with self._duckdb_lock:
+        
+            await asyncio.to_thread(_update)
     
     async def deactivate_fact(self, fact_id: str):
         """
@@ -824,7 +831,9 @@ class BuddyDatabase:
                 (fact_id,)
             )
         
-        await asyncio.to_thread(_deactivate)
+        async with self._duckdb_lock:
+        
+            await asyncio.to_thread(_deactivate)
     
     async def search_facts(self, query: str) -> List[UserFact]:
         """
@@ -859,7 +868,9 @@ class BuddyDatabase:
                 ))
             return facts
         
-        return await asyncio.to_thread(_search)
+        async with self._duckdb_lock:
+        
+            return await asyncio.to_thread(_search)
     
     # ============================================
     # Cleanup and Close
@@ -871,7 +882,8 @@ class BuddyDatabase:
             await self._sqlite_conn.close()
         
         if self._duckdb_conn:
-            await asyncio.to_thread(self._duckdb_conn.close)
+            async with self._duckdb_lock:
+                await asyncio.to_thread(self._duckdb_conn.close)
     
     @asynccontextmanager
     async def transaction(self):
