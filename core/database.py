@@ -220,6 +220,40 @@ class BuddyDatabase:
                 except Exception as exc:
                     logger.warning("HNSW index creation skipped: %s", exc)
 
+            # ── Personal RAG Documents ────────────────────────────────
+            self._duckdb_conn.execute("""
+                CREATE TABLE IF NOT EXISTS documents (
+                    id VARCHAR PRIMARY KEY,
+                    filename VARCHAR NOT NULL,
+                    filepath VARCHAR NOT NULL,
+                    filehash VARCHAR UNIQUE NOT NULL,
+                    extension VARCHAR NOT NULL,
+                    created_at TIMESTAMP NOT NULL
+                )
+            """)
+
+            self._duckdb_conn.execute("""
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id VARCHAR PRIMARY KEY,
+                    document_id VARCHAR NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    chunk_text VARCHAR NOT NULL,
+                    embedding FLOAT[384],
+                    FOREIGN KEY (document_id) REFERENCES documents(id)
+                )
+            """)
+
+            if self._vss_available:
+                try:
+                    self._duckdb_conn.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+                        ON document_chunks USING HNSW (embedding)
+                        WITH (metric = 'cosine')
+                    """)
+                    logger.info("HNSW index on document_chunks.embedding ready.")
+                except Exception as exc:
+                    logger.warning("HNSW index on chunks creation skipped: %s", exc)
+
         # Wrap synchronous DuckDB in async
         async with self._duckdb_lock:
             await asyncio.to_thread(_create_duckdb_schema)
@@ -876,6 +910,92 @@ class BuddyDatabase:
     # Cleanup and Close
     # ============================================
     
+    # ============================================
+    # Personal RAG Methods (DuckDB)
+    # ============================================
+
+    async def document_hash_exists(self, file_hash: str) -> bool:
+        """Check if a file hash already exists in the database."""
+        def _check():
+            result = self._duckdb_conn.execute(
+                "SELECT id FROM documents WHERE filehash = ?", [file_hash]
+            ).fetchone()
+            return result is not None
+            
+        async with self._duckdb_lock:
+            return await asyncio.to_thread(_check)
+
+    async def save_document(self, metadata: Dict[str, Any]) -> str:
+        """
+        Saves document metadata and its embedded chunks to DuckDB.
+        `metadata` should match the output of DocumentParser.process_file,
+        but chunks must be augmented with 'embedding' vectors.
+
+        Returns:
+            document_id: UUID of the inserted document
+        """
+        def _save():
+            doc_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat()
+            
+            # 1. Insert Document metadata
+            self._duckdb_conn.execute(
+                """
+                INSERT INTO documents (id, filename, filepath, filehash, extension, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [doc_id, metadata['filename'], metadata['filepath'], metadata['filehash'], metadata['extension'], now]
+            )
+            
+            # 2. Insert Chunks
+            for i, chunk in enumerate(metadata['chunks']):
+                chunk_id = str(uuid.uuid4())
+                self._duckdb_conn.execute(
+                    """
+                    INSERT INTO document_chunks (id, document_id, chunk_index, chunk_text, embedding)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [chunk_id, doc_id, i, chunk['text'], chunk['embedding']]
+                )
+            return doc_id
+
+        async with self._duckdb_lock:
+            return await asyncio.to_thread(_save)
+
+    async def search_document_chunks(self, embedding: List[float], limit: int = 5, distance_threshold: float = 0.5) -> List[Dict[str, Any]]:
+        """
+        Searches for relevant document chunks using vector similarity.
+        """
+        if not self._vss_available:
+            return []  # Graceful fail without VSS
+            
+        def _search():
+            # SQL logic matches what we use for user facts
+            query = f"""
+                SELECT c.chunk_text, d.filename, d.filepath, list_cosine_distance(c.embedding, ?::FLOAT[384]) as distance
+                FROM document_chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE list_cosine_distance(c.embedding, ?::FLOAT[384]) <= ?
+                ORDER BY distance ASC
+                LIMIT ?
+            """
+            
+            # Using embedding parameter twice for SELECT and WHERE clauses
+            results = self._duckdb_conn.execute(query, [embedding, embedding, distance_threshold, limit]).fetchall()
+            
+            return [
+                {
+                    "text": row[0],
+                    "filename": row[1],
+                    "filepath": row[2],
+                    "distance": row[3]
+                }
+                for row in results
+            ]
+            
+        async with self._duckdb_lock:
+            return await asyncio.to_thread(_search)
+
     async def close(self):
         """Close both database connections."""
         if self._sqlite_conn:

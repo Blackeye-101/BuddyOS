@@ -397,11 +397,26 @@ Respond with ONLY the word 'academic' or 'general'."""
             agent = self.researcher_agent
         else:
             query_embedding = await generate_embedding_safe(user_message)
+            user_facts = []
             if query_embedding is not None and self.db._vss_available:
                 user_facts = await self.db.get_relevant_facts(query_embedding, limit=10)
             else:
                 user_facts = await self.db.get_user_facts(active_only=True)
+            
+            # Personal RAG Injection
+            document_context = ""
+            # Simple heuristic to trigger document search: mentioning "document", "file", "csv", "pdf", etc.
+            if query_embedding is not None and any(w in user_message.lower() for w in ["document", "doc", "file", "pdf", "csv", "txt"]):
+                doc_chunks = await self.db.search_document_chunks(query_embedding, limit=5, distance_threshold=0.6)
+                if doc_chunks:
+                    document_context = "\n\n=== RELEVANT LOCAL DOCUMENTS ===\n"
+                    for dc in doc_chunks:
+                        document_context += f"Source: {dc['filename']}\nContent: {dc['text']}\n---\n"
+            
             system_prompt = self._build_buddy_prompt(user_facts, model_id)
+            if document_context:
+                system_prompt += document_context
+                
             agent = self.buddy_agent
 
         messages = [{"role": "system", "content": system_prompt}] + conversation_history + [{"role": "user", "content": user_message}]

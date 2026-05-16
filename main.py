@@ -158,6 +158,7 @@ class BuddyOSCLI:
         print("  /model    - Switch to a different model")
         print("  /new      - Start a new conversation")
         print("  /history  - Show recent conversations")
+        print("  /ingest   - Map a local file for searching (.txt, .md, .pdf, .csv, .docx)")
         print("  /exit     - Exit BuddyOS")
         print()
         print("Just type your message to chat with Buddy!")
@@ -320,6 +321,46 @@ class BuddyOSCLI:
                     
                     elif command == "/history":
                         await self.show_history()
+                        continue
+                        
+                    elif command.startswith("/ingest"):
+                        file_path = user_input[7:].strip(' "''\'')
+                        if not file_path:
+                            print("⚠️ Please provide a file path. Example: /ingest data/documents/mydoc.pdf")
+                            continue
+                        
+                        from core.document_parser import DocumentParser
+                        from core.embeddings import generate_embedding_safe
+                        print(f"📖 Ingesting {file_path}...")
+                        try:
+                            # 1. Parse and chunk
+                            metadata = DocumentParser.process_file(file_path)
+                            
+                            # 2. Check explicitly if already ingested
+                            exists = await self.db.document_hash_exists(metadata["filehash"])
+                            if exists:
+                                print(f"ℹ️ Document '{metadata['filename']}' (same content) already exists in Buddy's memory.")
+                                continue
+                            
+                            # 3. Embed chunks
+                            print(f"⚙️ Embedding {len(metadata['chunks'])} chunks...")
+                            
+                            chunk_dicts = []
+                            for c_text in metadata['chunks']:
+                                emb = await generate_embedding_safe(c_text)
+                                if emb is None:
+                                    print("⚠️ Failed to generate embedding for a chunk, skipping.")
+                                    continue
+                                chunk_dicts.append({"text": c_text, "embedding": emb})
+                                
+                            metadata['chunks'] = chunk_dicts
+                            
+                            # 4. Save to duckdb
+                            doc_id = await self.db.save_document(metadata)
+                            print(f"✅ Successfully ingested {len(chunk_dicts)} chunks for '{metadata['filename']}'. Memory updated!")
+                        except Exception as e:
+                            print(f"❌ Ingestion failed: {e}")
+                            logging.exception("Ingestion failed")
                         continue
                     
                     else:

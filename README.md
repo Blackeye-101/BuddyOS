@@ -16,7 +16,8 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 - **Continuous Learning (Automated Fact Extraction)**: Buddy constantly evaluates your conversations in the background. It extracts information about you (e.g., job, preferences, name) and stores them as active facts to customize future system prompts.
 - **Dynamic Context Window Management**: Constantly monitors context tokens and triggers summarization when the context threshold (~75%) is reached, preventing the LLM from forgetting the start of a long conversation.
 - **Real-Time Web Search & Tool Calling**: Buddy is equipped with an integrated web search tool using DuckDuckGo (`ddgs`) and an academic search tool using ArXiv (with advanced XML parsing and robust network timeouts). When asked about recent events or complex academic topics, it dynamically pauses the conversation, searches the web or literature, and integrates the live results into its final answer seamlessly.
-- **Interactive CLI**: Comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`) to manage your Buddy context easily.
+- **Local Document Grounding (Personal RAG)**: Native support for ingesting and querying your local files! Using the exact `/ingest <file_path>` command, you can parse `.txt`, `.md`, `.csv`, `.pdf`, and `.docx` files. The text is chunked (512 tokens with overlap) and embedded directly into DuckDB using `fastembed`. To search it, simply include words like "document", "pdf", or "file" in your chat message, and Buddy will dynamically inject the relevant chunks straight into the context.
+- **Interactive CLI**: Comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`, `/ingest`) to manage your Buddy context easily.
 
 ## 🛠 Tech Stack
 
@@ -89,8 +90,7 @@ Inside the chat loop, you can use the following commands:
 - `/facts` - View what Buddy actively knows about you
 - `/model` - Switch the current AI model on the fly
 - `/new` - Start a fresh conversation
-- `/history` - View a list of your recent conversations
-- `/exit` - Save state and gracefully exit
+- `/history` - View a list of your recent conversations- `/ingest` - Map a local file for searching (.txt, .md, .pdf, .csv, .docx)- `/exit` - Save state and gracefully exit
 
 ## 📂 Project Structure
 
@@ -114,9 +114,9 @@ buddy-os/
 - **Thread-safe Analytical Persistence**: Implemented strict `asyncio.Lock()` boundaries around all DuckDB interactions. This securely handles concurrent read/writes between the main thread and background LLM fact extraction threads, eliminating pending query lock crashes.
 - **UUID-based Key Generation**: Decoupled DuckDB's unique identifier constraints from non-deterministic LLM generation, ensuring stable collision-free database memory inserts.
 - **Hardened Fact Contradiction Logic**: Refined the hybrid RAG background extraction bounds to intelligently update mutually exclusive facts (e.g., correcting "Red Corolla" to "Silver Corolla") whilst ensuring independent historical or future plans are not unwarrantedly wiped by aggressive overriding.
+- **Local Document Grounding (Personal RAG)**: Transitioned from roadmap to active feature! Support for parsing `.txt`, `.md`, `.csv`, `.pdf`, and `.docx` via `/ingest`, integrating text chunking, SHA256 hashed deduplication, and fast HNSW vector lookup for secure standalone querying.
 
 ## 🗺️ Roadmap & Upcoming Architecture
 
 - **Rolling Summarization (Context Window Management)**: Moving beyond simply warning you when context thresholds hit ~75%, BuddyOS will actively manage token footprints. Once the limit is met, Buddy will automatically compress the oldest 50% of the conversation history into a dense `SYSTEM MEMORY` block, discarding raw verbose text but retaining the core logical flow entirely seamlessly.
 - **Plugin-Based Tool Decoupling**: The current tool implementations hardcoded in `core/tools.py` will be transitioned to a modular, decoupled plugin architecture (e.g., a `plugins/` directory). Individual tools and sub-agents will be constructed as independent classes that auto-register tightly with the runtime upon startup, unlocking a vastly expanded multi-agent ecosystem.
-- **Local Document Grounding (Personal RAG)**: Introduction of a `/ingest` command pointing to local file directories. This will support parsing, chunking, and embedding raw user documents into DuckDB so Buddy can natively pull exact contexts from your local files completely privately.
