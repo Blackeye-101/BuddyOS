@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 @plugin(
     name="web_search",
     description="Search the web for real-time information, recent news, or answers to questions you are unsure about.",
-    allowed_agents=["buddy"],
+    allowed_agents=["buddy", "finance_scraper"],
     parameters={
         "query": {"type": "string", "description": "The search query."}
     }

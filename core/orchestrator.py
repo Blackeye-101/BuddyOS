@@ -362,16 +362,29 @@ Otherwise, if elements are entirely new, add them as 'add_facts'. Treat implicit
                     await self.db.save_user_fact(category=category, fact_text=template.format(match.strip()), confidence=0.5, model_id=model_id)
 
     async def _determine_intent(self, user_message: str, model_id: str) -> str:
-        """Evaluate user intent to route to researcher or buddy."""
-        if "paper" in user_message.lower() or "arxiv" in user_message.lower() or "research" in user_message.lower():
+        """Evaluate user intent to route to researcher, finance, or buddy using a cascading strategy."""
+        um_lower = user_message.lower()
+        
+        # 1. Fast Path Keyword Intercepts
+        if any(kw in um_lower for kw in ["arxiv", "research paper", "academic paper", "academic research"]):
             return "researcher"
-        prompt = f"""Classify the following query as 'academic' or 'general'.
+        if any(kw in um_lower for kw in ["stock", "ticker", "portfolio", "nse", "bse", "market cap", "valuation"]):
+            return "finance"
+            
+        # 2. LLM Classification Safety Net
+        prompt = f"""Classify the following query into exactly ONE of the following categories:
+- 'academic': Focuses on theoretical research, whitepapers, university studies, or academic journals (Even if the subject is economics).
+- 'finance': Focuses on live stock markets, trading, live company analysis, portfolios, or corporate news.
+- 'general': Anything else (chat, coding, general knowledge).
+
 Query: "{user_message}"
-Respond with ONLY the word 'academic' or 'general'."""
+Respond with ONLY the category word ('academic', 'finance', or 'general')."""
         res = await self.router.get_completion(model_id=model_id, messages=[{"role": "user", "content": prompt}], max_tokens=10)
         content = (res.content or "general").strip().lower()
         if "academic" in content:
             return "researcher"
+        elif "finance" in content:
+            return "finance"
         return "buddy"
 
     async def process_message(
@@ -392,9 +405,15 @@ Respond with ONLY the word 'academic' or 'general'."""
         logger.info(f"Supervisor routed query to: {intent}")
 
         # 2. Context / Agents
+        is_finance_workflow = False
         if intent == "researcher":
             system_prompt = self._build_researcher_prompt()
             agent = self.researcher_agent
+            messages = [{"role": "system", "content": system_prompt}] + conversation_history + [{"role": "user", "content": user_message}]
+        elif intent == "finance":
+            from agents.finance import FinanceWorkflow
+            is_finance_workflow = True
+            finance_wf = FinanceWorkflow(self.router, self.tool_registry)
         else:
             query_embedding = await generate_embedding_safe(user_message)
             user_facts = []
@@ -418,11 +437,18 @@ Respond with ONLY the word 'academic' or 'general'."""
                 system_prompt += document_context
                 
             agent = self.buddy_agent
-
-        messages = [{"role": "system", "content": system_prompt}] + conversation_history + [{"role": "user", "content": user_message}]
+            messages = [{"role": "system", "content": system_prompt}] + conversation_history + [{"role": "user", "content": user_message}]
 
         # 3. Execution
-        result_content, result_model_used, result_token_count, fallback_occurred, fallback_from = await agent.run(messages, model_id=model_id)
+        if is_finance_workflow:
+            wf_res = await finance_wf.run(user_message, model_id=model_id)
+            result_content = wf_res["final_report"]
+            result_model_used = model_id
+            result_token_count = 0  # Trading desk manages its own internal token metrics
+            fallback_occurred = False
+            fallback_from = None
+        else:
+            result_content, result_model_used, result_token_count, fallback_occurred, fallback_from = await agent.run(messages, model_id=model_id)
 
         # 4. Save
         try:
