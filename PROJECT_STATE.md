@@ -45,8 +45,8 @@ BuddyOS operates around an **Orchestrator** (the "Buddy" agent), acting as the c
     - **Capabilities**: Dynamic model discovery detecting local `_API_KEY` env vars and listing what's available contextually. `BuddyDeps` manages the Dependency Injection container used heavily by Pydantic-AI.
 
 6.  **`buddy-os/ui/`**
-    - **State**: Stubbed / Not Implemented
-    - **Capabilities**: Intended house for a richer Streamlit frontend. Empty besides `__init__.py`.
+    - **State**: Functional (Streamlit Web Interface)
+    - **Capabilities**: Full web counterpart to the CLI app. Main entry point is `app.py`. Features sidebar navigation, chat loops wrapped through `asyncio` state bridges, and tools for Personal RAG file ingestion and DuckDB fact visualization.
 
 ---
 
