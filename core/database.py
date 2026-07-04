@@ -27,6 +27,7 @@ class Conversation:
     updated_at: str
     title: str
     model_id: str
+    summary: str = ""
 
 
 @dataclass
@@ -98,7 +99,8 @@ class BuddyDatabase:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 title TEXT,
-                model_id TEXT NOT NULL
+                model_id TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT ''
             )
         """)
         
@@ -137,6 +139,14 @@ class BuddyDatabase:
                 )
             except Exception:
                 pass  # Column already exists — safe to ignore
+
+        # Migration: add summary column to conversations for pre-existing databases
+        try:
+            await self._sqlite_conn.execute(
+                "ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass  # Column already exists — safe to ignore
 
         # Create index for messages
         await self._sqlite_conn.execute("""
@@ -278,8 +288,8 @@ class BuddyDatabase:
         
         await self._sqlite_conn.execute(
             """
-            INSERT INTO conversations (id, created_at, updated_at, title, model_id)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO conversations (id, created_at, updated_at, title, model_id, summary)
+            VALUES (?, ?, ?, ?, ?, '')
             """,
             (conversation_id, now, now, title, model_id)
         )
@@ -298,7 +308,7 @@ class BuddyDatabase:
             Conversation object or None if not found
         """
         async with self._sqlite_conn.execute(
-            "SELECT id, created_at, updated_at, title, model_id FROM conversations WHERE id = ?",
+            "SELECT id, created_at, updated_at, title, model_id, summary FROM conversations WHERE id = ?",
             (conversation_id,)
         ) as cursor:
             row = await cursor.fetchone()
@@ -308,7 +318,8 @@ class BuddyDatabase:
                     created_at=row[1],
                     updated_at=row[2],
                     title=row[3],
-                    model_id=row[4]
+                    model_id=row[4],
+                    summary=row[5] or ""
                 )
         return None
     
@@ -325,7 +336,7 @@ class BuddyDatabase:
         conversations = []
         async with self._sqlite_conn.execute(
             """
-            SELECT id, created_at, updated_at, title, model_id 
+            SELECT id, created_at, updated_at, title, model_id, summary
             FROM conversations 
             ORDER BY updated_at DESC 
             LIMIT ?
@@ -338,7 +349,8 @@ class BuddyDatabase:
                     created_at=row[1],
                     updated_at=row[2],
                     title=row[3],
-                    model_id=row[4]
+                    model_id=row[4],
+                    summary=row[5] or ""
                 ))
         return conversations
     
@@ -370,7 +382,28 @@ class BuddyDatabase:
             (conversation_id,)
         )
         await self._sqlite_conn.commit()
-    
+
+    async def update_conversation_summary(self, conversation_id: str, summary: str):
+        """Persist an auto-generated one-line summary for a conversation."""
+        await self._sqlite_conn.execute(
+            "UPDATE conversations SET summary = ? WHERE id = ?",
+            (summary, conversation_id),
+        )
+        await self._sqlite_conn.commit()
+
+    async def purge_all_conversations(self):
+        """Delete every conversation and all associated messages (via CASCADE)."""
+        await self._sqlite_conn.execute("DELETE FROM conversations")
+        await self._sqlite_conn.commit()
+
+    async def purge_all_facts(self):
+        """Hard-delete every user fact from DuckDB (leaves documents intact)."""
+        def _purge():
+            self._duckdb_conn.execute("DELETE FROM facts")
+
+        async with self._duckdb_lock:
+            await asyncio.to_thread(_purge)
+
     # ============================================
     # Message Methods (SQLite - Async)
     # ============================================
@@ -995,6 +1028,29 @@ class BuddyDatabase:
             
         async with self._duckdb_lock:
             return await asyncio.to_thread(_search)
+
+    async def list_documents(self) -> List[Dict[str, Any]]:
+        """Return metadata for all ingested documents, newest first."""
+        def _list():
+            rows = self._duckdb_conn.execute(
+                "SELECT id, filename, extension, created_at FROM documents ORDER BY created_at DESC"
+            ).fetchall()
+            return [
+                {"id": r[0], "filename": r[1], "extension": r[2], "created_at": r[3]}
+                for r in rows
+            ]
+
+        async with self._duckdb_lock:
+            return await asyncio.to_thread(_list)
+
+    async def purge_all_documents(self):
+        """Hard-delete all document chunks and documents from DuckDB (leaves facts intact)."""
+        def _purge():
+            self._duckdb_conn.execute("DELETE FROM document_chunks")
+            self._duckdb_conn.execute("DELETE FROM documents")
+
+        async with self._duckdb_lock:
+            await asyncio.to_thread(_purge)
 
     async def close(self):
         """Close both database connections."""

@@ -11,6 +11,10 @@ def render_facts_viewer():
         st.info("No facts recorded yet. Start chatting about your preferences, background, or goals!")
         return
 
+    if st.button("🗑️ Clear All Facts", use_container_width=True, type="secondary"):
+        run_async(db.purge_all_facts())
+        st.rerun()
+
     # Group facts by category
     from collections import defaultdict
     categories = defaultdict(list)

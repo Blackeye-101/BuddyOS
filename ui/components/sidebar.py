@@ -54,7 +54,9 @@ def render_sidebar():
                     else:
                         conv_id = conv[0]
 
-                    label = f"Chat {str(conv_id)[:6]}"
+                    # Show LLM-generated summary when available, else short ID
+                    summary = getattr(conv, "summary", "") or ""
+                    label = summary if summary else f"Chat {str(conv_id)[:6]}"
 
                     btn_type = "primary" if conv_id == st.session_state.conversation_id else "secondary"
                     if st.button(label, key=f"hist_{conv_id}", use_container_width=True, type=btn_type):
@@ -63,7 +65,15 @@ def render_sidebar():
                         st.rerun()
         else:
             st.info("No previous conversations")
-            
+
+        if history:
+            st.divider()
+            if st.button("🗑️ Clear All Chats", use_container_width=True, type="secondary"):
+                run_async(db.purge_all_conversations())
+                st.session_state.conversation_id = None
+                st.session_state.messages = []
+                st.rerun()
+
         st.divider()
         st.markdown("### Help")
         st.markdown("- **Facts:** Check what Buddy knows about you in the Memory tab.\n- **Ingest:** Upload docs to your Local RAG DB.\n- **Model:** Switch models freely, even mid-chat!")

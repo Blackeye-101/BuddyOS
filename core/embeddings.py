@@ -57,6 +57,19 @@ def embed_sync(text: str) -> list[float]:
     return vectors[0].tolist()
 
 
+def embed_batch_sync(texts: list[str]) -> list[list[float]]:
+    """
+    Embed a list of texts in one model call (more efficient than calling
+    embed_sync repeatedly). Intended only for callers already inside a
+    worker thread.
+    """
+    if not texts:
+        return []
+    model = _get_model()
+    vectors = list(model.embed(texts))
+    return [v.tolist() for v in vectors]
+
+
 async def generate_embedding(text: str) -> list[float]:
     """
     Embed *text* asynchronously (CPU-bound encode runs in a thread pool).
@@ -80,3 +93,19 @@ async def generate_embedding_safe(text: str) -> Optional[list[float]]:
     except Exception as exc:
         logger.warning("Embedding generation failed: %s", exc)
         return None
+
+
+async def generate_embeddings_batch(texts: list[str]) -> list[list[float]]:
+    """
+    Embed a list of texts in one async call (CPU-bound work runs in a
+    thread-pool worker via embed_batch_sync).
+
+    Args:
+        texts: Texts to embed.
+
+    Returns:
+        List of 384-float lists, one per input text.
+    """
+    if not texts:
+        return []
+    return await asyncio.to_thread(embed_batch_sync, texts)
