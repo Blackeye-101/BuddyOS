@@ -132,8 +132,3 @@ buddy-os/
 - **UUID-based Key Generation**: Decoupled DuckDB's unique identifier constraints from non-deterministic LLM generation, ensuring stable collision-free database memory inserts.
 - **Hardened Fact Contradiction Logic**: Refined the hybrid RAG background extraction bounds to intelligently update mutually exclusive facts (e.g., correcting "Red Corolla" to "Silver Corolla") whilst ensuring independent historical or future plans are not unwarrantedly wiped by aggressive overriding.
 - **Local Document Grounding (Personal RAG)**: Transitioned from roadmap to active feature! Support for parsing `.txt`, `.md`, `.csv`, `.pdf`, and `.docx` via `/ingest`, integrating text chunking, SHA256 hashed deduplication, and fast HNSW vector lookup for secure standalone querying.
-
-## 🗺️ Roadmap & Upcoming Architecture
-
-- **Rolling Summarization (Context Window Management)**: Moving beyond simply warning you when context thresholds hit ~75%, BuddyOS will actively manage token footprints. Once the limit is met, Buddy will automatically compress the oldest 50% of the conversation history into a dense `SYSTEM MEMORY` block, discarding raw verbose text but retaining the core logical flow entirely seamlessly.
-- **Plugin-Based Tool Decoupling**: The current tool implementations hardcoded in `core/tools.py` will be transitioned to a modular, decoupled plugin architecture (e.g., a `plugins/` directory). Individual tools and sub-agents will be constructed as independent classes that auto-register tightly with the runtime upon startup, unlocking a vastly expanded multi-agent ecosystem.
