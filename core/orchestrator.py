@@ -27,6 +27,10 @@ class OrchestratorResponse(BaseModel):
     model_used: str
     fallback_occurred: bool = False
     fallback_from: Optional[str] = None
+    # IDs of the DB rows written for this turn; used by the UI to delete them
+    # cleanly if the user discards the response via the Stop button.
+    user_message_id: Optional[str] = None
+    assistant_message_id: Optional[str] = None
 
 
 class FactExtractionItem(BaseModel):
@@ -548,6 +552,8 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
             model_used=result_model_used,
             fallback_occurred=fallback_occurred,
             fallback_from=fallback_from,
+            user_message_id=user_msg_id,
+            assistant_message_id=asst_msg_id,
         )
 
     async def start_new_conversation(self, model_id: str, title: Optional[str] = None) -> str:
