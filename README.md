@@ -21,8 +21,14 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
   - **Processor**: Evaluates the raw data to extract core macroeconomic sentiment (Bullish/Bearish/Neutral).
   - **Matcher**: Fuses live quantitative stock ticker data with the qualitative macro sentiment.
   - **Validator**: Acts as a strict compliance officer to format the fused data into an institutional-grade Markdown report with necessary financial disclaimers.
-- **Local Document Grounding (Personal RAG)**: Native support for ingesting and querying your local files! Using the exact `/ingest <file_path>` command, you can parse `.txt`, `.md`, `.csv`, `.pdf`, and `.docx` files. The text is chunked (512 tokens with overlap) and embedded directly into DuckDB using `fastembed`. To search it, simply include words like "document", "pdf", or "file" in your chat message, and Buddy will dynamically inject the relevant chunks straight into the context.
-- **Interactive CLI**: Comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`, `/ingest`) to manage your Buddy context easily.
+- **Local Document Grounding (Personal RAG)**: Native support for ingesting and querying your local files! You can parse `.txt`, `.md`, `.csv`, `.pdf`, and `.docx` files directly via the UI's document uploader. The text is chunked (512 tokens with overlap) and embedded directly into DuckDB using `fastembed`. To search it, simply include words like "document", "pdf", or "file" in your chat message, and Buddy will dynamically inject the relevant chunks straight into the context.
+- **Interactive Streamlit UI**: A modern, feature-rich chat interface that provides:
+  - **Dynamic Chat Management**: Create new chats, see auto-generated concise summaries for previous chats in the sidebar, and switch between them effortlessly.
+  - **Scrollable Layouts**: Ergonomic, fixed-height bounded scroll areas ensuring the input bar stays pinned to the viewport bottom (just like your favorite commercial tools).
+  - **Data Privacy & Control**: Explicit UI buttons to obliterate and hard-delete all conversations (`Clear All Chats`), facts (`Clear All Facts`), and ingested documents (`Clear All Documents`) directly from SQLite/DuckDB.
+  - **Word-by-word Streaming**: Real-time asynchronous text streaming over the LiteLLM router.
+  - **Interruption Mechanisms (Kill Switch)**: An inline `🛑 Stop Generating` button allows you to sever the model connection midway, abandoning incomplete queries without polluting your context history or DB.
+- **Interactive CLI**: Optionally comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`, `/ingest`) to manage your Buddy context easily headless.
 
 ## 🛠 Tech Stack
 
@@ -31,7 +37,7 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 - **Tools Integrations**: `ddgs` (DuckDuckGo Search)
 - **Database**: SQLite (`aiosqlite`), DuckDB + VSS extension (HNSW vector index)
 - **Embeddings**: [`fastembed`](https://github.com/qdrant/fastembed) — `BAAI/bge-small-en-v1.5` (384-dim, ONNX Runtime, no PyTorch)
-- **Frontend (Planned)**: Streamlit
+- **Frontend**: Streamlit-based graphical user interface (`uv run streamlit run ui/app.py`).
 
 ## 🚀 Getting Started
 
@@ -81,7 +87,13 @@ BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It i
 
 ### Running BuddyOS
 
-Run the interactive CLI application:
+To launch the graphical web UI using Streamlit:
+
+```bash
+uv run streamlit run ui/app.py
+```
+
+Or run the interactive CLI application:
 
 ```bash
 python main.py
