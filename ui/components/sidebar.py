@@ -54,9 +54,10 @@ def render_sidebar():
                     else:
                         conv_id = conv[0]
 
-                    # Show LLM-generated summary when available, else short ID
+                    # Priority: LLM summary → first-message title → short UUID
                     summary = getattr(conv, "summary", "") or ""
-                    label = summary if summary else f"Chat {str(conv_id)[:6]}"
+                    title_fallback = getattr(conv, "title", "") or ""
+                    label = summary or title_fallback or f"Chat {str(conv_id)[:6]}"
 
                     btn_type = "primary" if conv_id == st.session_state.conversation_id else "secondary"
                     if st.button(label, key=f"hist_{conv_id}", use_container_width=True, type=btn_type):

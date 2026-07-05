@@ -1029,6 +1029,10 @@ class BuddyDatabase:
         async with self._duckdb_lock:
             return await asyncio.to_thread(_search)
 
+    async def get_messages(self, conversation_id: str) -> List[Message]:
+        """Alias for get_conversation_history — used by the Streamlit UI layer."""
+        return await self.get_conversation_history(conversation_id)
+
     async def list_documents(self) -> List[Dict[str, Any]]:
         """Return metadata for all ingested documents, newest first."""
         def _list():

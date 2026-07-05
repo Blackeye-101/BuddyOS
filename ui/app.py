@@ -1,3 +1,45 @@
+import logging
+import logging.handlers
+import sys
+from pathlib import Path
+
+# ── Logging bootstrap ──────────────────────────────────────────────────────────
+# Must run before any local imports so every module's logger is captured.
+# Mirrors the same setup in main.py (CLI entry-point) so the Streamlit UI
+# path writes to the same rotating log file.
+_LOGS_DIR = Path("logs")
+_LOGS_DIR.mkdir(exist_ok=True)
+
+_root = logging.getLogger()
+if not _root.handlers:          # guard: only configure once per process
+    _root.setLevel(logging.DEBUG)
+
+    _fh = logging.handlers.RotatingFileHandler(
+        _LOGS_DIR / "buddy-os.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _fh.setLevel(logging.DEBUG)
+    _fh.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    _root.addHandler(_fh)
+
+    _ch = logging.StreamHandler(sys.stderr)
+    _ch.setLevel(logging.WARNING)
+    _ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    _root.addHandler(_ch)
+
+    # Silence noisy LiteLLM internals
+    import litellm
+    litellm.suppress_debug_info = True
+    litellm.verbose = False
+    litellm.drop_params = True
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("litellm").setLevel(logging.WARNING)
+# ──────────────────────────────────────────────────────────────────────────────
+
 import streamlit as st
 
 # Configure the page - MUST be the first Streamlit command

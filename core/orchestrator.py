@@ -275,6 +275,70 @@ class BuddyOrchestrator:
             return True
         return False
 
+    async def _generate_conversation_title(self, conversation_id: str, model_id: str) -> None:
+        """
+        Generate a short human-readable title for the conversation and persist it.
+        Triggered as a background task after the 2nd full exchange (4th message)
+        so there is enough context for a meaningful title.
+
+        Uses whatever model the user is currently on; the Router's built-in
+        fallback chain ensures a free alternative is tried if the primary model
+        rejects or rate-limits the request.
+        """
+        try:
+            history = await self.db.get_conversation_history(conversation_id, limit=4)
+            if not history:
+                return
+
+            # Build a compact transcript (cap each turn at 200 chars to save tokens)
+            transcript = "\n".join(
+                f"{msg.role.capitalize()}: {msg.content[:200]}"
+                for msg in history
+            )
+
+            # --- Primary path: ask the active model for a short title -------
+            title = ""
+            try:
+                result = await self.router.get_completion(
+                    model_id=model_id,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": (
+                                "Write a 3-5 word title that concisely captures the topic "
+                                "of the following conversation. Reply with ONLY the title, "
+                                "no quotes, no punctuation at the end.\n\n"
+                                f"{transcript}"
+                            ),
+                        }
+                    ],
+                    max_tokens=20,
+                    temperature=0.3,
+                )
+                title = (result.content or "").strip()
+            except Exception as llm_exc:
+                # LLM unavailable (rate-limit, quota, etc.) — derive a
+                # heuristic title from the first user message instead so the
+                # sidebar always shows something meaningful.
+                logger.warning(
+                    "LLM title generation failed (%s), using heuristic fallback.", llm_exc
+                )
+                first_user_msg = next(
+                    (msg.content for msg in history if msg.role == "user"), ""
+                )
+                title = first_user_msg[:45].strip()
+                if len(first_user_msg) > 45:
+                    title += "…"
+
+            if title:
+                await self.db.update_conversation_summary(conversation_id, title)
+                logger.info(
+                    "Conversation title set: '%s' for %s", title, conversation_id
+                )
+
+        except Exception as exc:
+            logger.warning("Conversation title generation failed: %s", exc)
+
     async def _fill_message_topics(self, message_id: str, content: str, model_id: str) -> None:
         try:
             topics = await self.db._normalizer.extract_topics(content, model=model_id)
@@ -467,7 +531,14 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
         
         # Launch LLM fact extraction as a background task to avoid blocking the reply
         self._launch_background_task(self._extract_facts_background(user_message, model_id))
-        
+
+        # Generate conversation title after the 2nd full exchange (conversation_history
+        # holds messages BEFORE this turn, so len == 2 means we just completed turn 2)
+        if len(conversation_history) == 2:
+            self._launch_background_task(
+                self._generate_conversation_title(conversation_id, model_id)
+            )
+
         await self._check_context_window(conversation_id, model_id)
 
         return OrchestratorResponse(
