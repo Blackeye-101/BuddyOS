@@ -672,6 +672,15 @@ class BuddyDatabase:
         re-statements of the same underlying fact hit the same key,
         allowing confidence reinforcement and contradiction detection
         (via is_contradiction) to actually trigger.
+
+        IMPORTANT: `facts.fact_key` has a UNIQUE index (idx_facts_key) that
+        applies across ALL rows, active or not. The upsert lookup below must
+        therefore match on fact_key alone -- never "AND is_active = TRUE" --
+        otherwise a previously-deactivated row with the same fact_key is
+        invisible to the lookup, the code falls through to INSERT, and DuckDB
+        raises "Constraint Error: Duplicate key ... violates unique
+        constraint" (this was the bug that caused Background Fact Extraction
+        failures on fact_key values like "personal_name").
         """
         import uuid
         from datetime import datetime
@@ -690,14 +699,29 @@ class BuddyDatabase:
         def _upsert_fact() -> str:
             now = datetime.utcnow().isoformat()
 
+            # Look up by fact_key ONLY (no is_active filter) -- see docstring.
             existing = self._duckdb_conn.execute(
-                "SELECT id, fact_text, confidence FROM facts WHERE fact_key = ? AND is_active = TRUE",
+                "SELECT id, fact_text, confidence, is_active FROM facts WHERE fact_key = ?",
                 (fact_key,),
             ).fetchone()
 
             if existing:
-                existing_id, existing_text, existing_conf = existing
-                if normalizer.is_contradiction(fact_key, existing_text, fact_text):
+                existing_id, existing_text, existing_conf, is_active = existing
+
+                if not is_active:
+                    # The fact_key was previously soft-deleted. Reactivate the
+                    # existing row with the newly observed text/confidence
+                    # rather than inserting a new row, which would collide
+                    # with the unique index on fact_key.
+                    self._duckdb_conn.execute(
+                        """
+                        UPDATE facts
+                        SET fact_text = ?, confidence = ?, last_seen = ?, embedding = ?, is_active = TRUE
+                        WHERE id = ?
+                        """,
+                        (fact_text, confidence, now, embedding, existing_id),
+                    )
+                elif normalizer.is_contradiction(fact_key, existing_text, fact_text):
                     self._duckdb_conn.execute(
                         "UPDATE facts SET fact_text = ?, confidence = 0.6, last_seen = ?, embedding = ? WHERE id = ?",
                         (fact_text, now, embedding, existing_id),
