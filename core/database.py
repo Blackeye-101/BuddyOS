@@ -668,17 +668,20 @@ class BuddyDatabase:
     ) -> str:
         """
         Save a user fact to DuckDB.
-        Generates a unique fact_key via UUID to ensure we avoid DuckDB collision constraints,
-        allowing the system to store multiple facts of the same category.
+        Generates a deterministic fact_key via FactNormalizer so that
+        re-statements of the same underlying fact hit the same key,
+        allowing confidence reinforcement and contradiction detection
+        (via is_contradiction) to actually trigger.
         """
         import uuid
         from datetime import datetime
-        
-        # Generate a unique programmatic ID instead of relying on unreliable LLM categorizations
-        safe_cat = "".join(c if c.isalnum() else "_" for c in category.lower())
-        fact_key = f"{safe_cat}_{uuid.uuid4().hex[:8]}"
-        
+
         normalizer = self._normalizer  # capture for thread closure
+
+        # Deterministic key (regex rules first, LLM fallback) so repeated
+        # facts of the same type collide on fact_key instead of always
+        # generating a brand-new random suffix.
+        fact_key = await normalizer.normalize(category, fact_text, model=model_id)
 
         # Generate embedding before entering the sync thread
         from core.embeddings import generate_embedding_safe
