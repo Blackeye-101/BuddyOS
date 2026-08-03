@@ -37,7 +37,12 @@ class FinanceWorkflow:
             {"role": "user", "content": user_query}
         ]
         
-        result = await self.finance_scraper.run(messages, model_id)
+        # Async generators must be iterated over
+        async for item in self.finance_scraper.run(messages, model_id):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                result = item
         news_output = result[0]
         
         # 2. Run Processor
@@ -51,7 +56,11 @@ class FinanceWorkflow:
             {"role": "user", "content": f"User Subject: {user_query}\n\nRaw News Data:\n{news_output}"}
         ]
         
-        proc_result = await self.finance_processor.run(proc_messages, model_id)
+        async for item in self.finance_processor.run(proc_messages, model_id):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                proc_result = item
         sentiment_output = proc_result[0]
         
         # 3. Run Matcher
@@ -66,7 +75,11 @@ class FinanceWorkflow:
             {"role": "user", "content": f"User Query: {user_query}\n\nMacro Sentiment:\n{sentiment_output}"}
         ]
         
-        match_result = await self.finance_matcher.run(matcher_messages, model_id)
+        async for item in self.finance_matcher.run(matcher_messages, model_id):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                match_result = item
         quant_output = match_result[0]
         
         # 4. Run Validator
@@ -82,17 +95,22 @@ class FinanceWorkflow:
             {"role": "user", "content": f"Quant & Sentiment Data:\n{quant_output}"}
         ]
         
-        val_result = await self.finance_validator.run(val_messages, model_id)
+        async for item in self.finance_validator.run(val_messages, model_id):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                val_result = item
         final_report = val_result[0]
         
-        return {
+        yield {
+            "type": "result",
             "news": news_output,
             "sentiment": sentiment_output,
             "quant_data": quant_output,
             "final_report": final_report
         }
 
-    async def run_matcher_test(self, user_query: str) -> dict:
+    async def run_matcher_test(self, user_query: str):
         """Isolated test method for Step 2A -> 2B -> 2C integration"""
         logger.info(f"Running scraper -> processor -> matcher test for: {user_query}")
         
@@ -107,8 +125,11 @@ class FinanceWorkflow:
             {"role": "user", "content": user_query}
         ]
         
-        result = await self.finance_scraper.run(messages, "gemini/gemini-2.5-flash")
-        news_output = result[0]
+        async for item in self.finance_scraper.run(messages, "gemini/gemini-2.5-flash"):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                news_output = item[0]
         
         # 2. Run Processor
         processor_prompt = (
@@ -121,8 +142,11 @@ class FinanceWorkflow:
             {"role": "user", "content": f"User Subject: {user_query}\n\nRaw News Data:\n{news_output}"}
         ]
         
-        proc_result = await self.finance_processor.run(proc_messages, "gemini/gemini-2.5-flash")
-        sentiment_output = proc_result[0]
+        async for item in self.finance_processor.run(proc_messages, "gemini/gemini-2.5-flash"):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                sentiment_output = item[0]
         
         # 3. Run Matcher
         matcher_prompt = (
@@ -136,16 +160,20 @@ class FinanceWorkflow:
             {"role": "user", "content": f"User Query: {user_query}\n\nMacro Sentiment:\n{sentiment_output}"}
         ]
         
-        match_result = await self.finance_matcher.run(matcher_messages, "gemini/gemini-2.5-flash")
-        quant_output = match_result[0]
+        async for item in self.finance_matcher.run(matcher_messages, "gemini/gemini-2.5-flash"):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                quant_output = item[0]
         
-        return {
+        yield {
+            "type": "result",
             "news": news_output,
             "sentiment": sentiment_output,
             "quant_data": quant_output
         }
 
-    async def run_processor_test(self, user_query: str) -> dict:
+    async def run_processor_test(self, user_query: str):
         """Isolated test method for Step 2A -> Step 2B integration"""
         logger.info(f"Running scraper -> processor test for: {user_query}")
         
@@ -160,8 +188,11 @@ class FinanceWorkflow:
             {"role": "user", "content": user_query}
         ]
         
-        result = await self.finance_scraper.run(messages, "gemini/gemini-2.5-flash")
-        news_output = result[0]
+        async for item in self.finance_scraper.run(messages, "gemini/gemini-2.5-flash"):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                news_output = item[0]
         
         # 2. Run Processor
         processor_prompt = (
@@ -174,10 +205,14 @@ class FinanceWorkflow:
             {"role": "user", "content": f"User Subject: {user_query}\n\nRaw News Data:\n{news_output}"}
         ]
         
-        proc_result = await self.finance_processor.run(proc_messages, "gemini/gemini-2.5-flash")
-        sentiment_output = proc_result[0]
+        async for item in self.finance_processor.run(proc_messages, "gemini/gemini-2.5-flash"):
+            if isinstance(item, dict) and item.get("type") == "status":
+                yield item
+            else:
+                sentiment_output = item[0]
         
-        return {
+        yield {
+            "type": "result",
             "news": news_output,
             "sentiment": sentiment_output
         }
@@ -197,6 +232,8 @@ class FinanceWorkflow:
             {"role": "user", "content": user_query}
         ]
         
-        result = await self.finance_scraper.run(messages, "gemini/gemini-2.5-flash")
+        async for item in self.finance_scraper.run(messages, "gemini/gemini-2.5-flash"):
+            if not isinstance(item, dict):
+                result = item
         news_output = result[0]
         return news_output

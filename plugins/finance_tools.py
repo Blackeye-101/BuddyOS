@@ -1,19 +1,8 @@
 import logging
 import yfinance as yf
-import requests
 from core.tools import plugin
 
 logger = logging.getLogger(__name__)
-
-# Create a customized session to bypass aggressive Yahoo Finance blocking
-# By spoofing a real browser's user-agent and accept headers, yfinance can reliably pull deep data.
-_session = requests.Session()
-_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Connection': 'keep-alive',
-})
 
 @plugin(
     name="get_live_stock_info",
@@ -24,7 +13,7 @@ _session.headers.update({
     }
 )
 def get_live_stock_info(ticker: str) -> str:
-    """Fetch live stock details using yfinance with an anti-blocking session."""
+    """Fetch live stock details using yfinance."""
     logger.info(f"Fetching deep live stock info for ticker: {ticker}")
     
     ticker_upper = ticker.upper()
@@ -32,7 +21,7 @@ def get_live_stock_info(ticker: str) -> str:
         ticker_upper = f"{ticker_upper}.NS"
         
     try:
-        stock = yf.Ticker(ticker_upper, session=_session)
+        stock = yf.Ticker(ticker_upper)
         info = stock.info
         
         if not info or ('regularMarketPrice' not in info and 'currentPrice' not in info):

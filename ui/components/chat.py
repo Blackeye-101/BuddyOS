@@ -1,5 +1,5 @@
 import streamlit as st
-from ui.state import run_async
+from ui.state import run_async, run_async_gen
 from core.orchestrator import OrchestratorRequest
 
 
@@ -81,25 +81,34 @@ def render_chat(user_input=None):
                 )
 
                 # 3. Block while the LLM + tool chain runs
-                with st.spinner("Buddy is thinking..."):
-                    try:
-                        response = run_async(
-                            orchestrator.process_message(
-                                user_message=user_input,
-                                conversation_id=st.session_state.conversation_id,
-                                model_id=st.session_state.current_model_id,
-                            )
-                        )
-                    except Exception as e:
-                        st.error(f"Error processing message: {str(e)}")
-                        st.exception(e)
-                        # Roll back the pending user message
-                        if (
-                            st.session_state.messages
-                            and st.session_state.messages[-1].get("role") == "user"
-                        ):
-                            st.session_state.messages.pop()
-                        return
+                status_container = st.status("Buddy is thinking...", expanded=True)
+                
+                try:
+                    response = None
+                    gen = orchestrator.process_message(
+                        user_message=user_input,
+                        conversation_id=st.session_state.conversation_id,
+                        model_id=st.session_state.current_model_id,
+                    )
+                    
+                    for item in run_async_gen(gen):
+                        if isinstance(item, dict) and item.get("type") == "status":
+                            status_container.write(item["msg"])
+                        else:
+                            response = item
+                            
+                    status_container.update(label="Done thinking!", state="complete", expanded=False)
+                except Exception as e:
+                    status_container.update(label="An error occurred", state="error", expanded=True)
+                    st.error(f"Error processing message: {str(e)}")
+                    st.exception(e)
+                    # Roll back the pending user message
+                    if (
+                        st.session_state.messages
+                        and st.session_state.messages[-1].get("role") == "user"
+                    ):
+                        st.session_state.messages.pop()
+                    return
 
                 # If Stop was clicked during thinking, discard now without streaming
                 if st.session_state.get("stop_generation"):

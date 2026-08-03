@@ -16,6 +16,33 @@ def run_async(coro):
     future = asyncio.run_coroutine_threadsafe(coro, _loop)
     return future.result()
 
+
+def run_async_gen(async_gen):
+    """Safely run async generators in Streamlit."""
+    import queue
+    q = queue.Queue()
+    _DONE = object()
+    _ERROR = object()
+
+    async def _exhaust():
+        try:
+            async for item in async_gen:
+                q.put(("item", item))
+            q.put(("done", _DONE))
+        except Exception as e:
+            q.put(("error", e))
+
+    asyncio.run_coroutine_threadsafe(_exhaust(), _loop)
+
+    while True:
+        msg_type, payload = q.get()
+        if msg_type == "item":
+            yield payload
+        elif msg_type == "done":
+            break
+        elif msg_type == "error":
+            raise payload
+
 @st.cache_resource
 def get_system_components():
     """Initialize system components exactly once."""

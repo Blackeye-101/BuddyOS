@@ -48,7 +48,7 @@ class BaseAgent:
         self.router = router
         self.tool_registry = tool_registry
 
-    async def run(self, messages: list, model_id: str, temperature: float = 0.7, max_steps: int = 5) -> tuple[str, str, int, bool, Optional[str]]:
+    async def run(self, messages: list, model_id: str, temperature: float = 0.7, max_steps: int = 5):
         tools = self.tool_registry.get_tools_for_agent(self.agent_name)
         result_content = ""
         result_model_used = model_id
@@ -88,7 +88,17 @@ class BaseAgent:
                     function_args = tool_call.function.arguments
                     logger.info(f"{self.agent_name} executing tool: {function_name}")
                     
-                    tool_result_str = self.tool_registry.execute_tool(function_name, function_args)
+                    yield {"type": "status", "msg": f"Running tool {function_name}..."}
+                    
+                    # Offload blocking tool executions to an asyncio run_in_executor
+                    # or await if it evaluates properly. Here we sync block inside async iteration.
+                    loop = asyncio.get_running_loop()
+                    tool_result_str = await loop.run_in_executor(
+                        None, 
+                        self.tool_registry.execute_tool, 
+                        function_name, 
+                        function_args
+                    )
                     
                     messages.append({
                         "role": "tool",
@@ -107,7 +117,7 @@ class BaseAgent:
         if not result_content and result and result.content:
             result_content = result.content
             
-        return result_content or "", result_model_used, result_token_count, fallback_occurred, fallback_from
+        yield result_content or "", result_model_used, result_token_count, fallback_occurred, fallback_from
 
 
 class BuddyOrchestrator:
@@ -509,14 +519,30 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
 
         # 3. Execution
         if is_finance_workflow:
-            wf_res = await finance_wf.run(user_message, model_id=model_id)
-            result_content = wf_res["final_report"]
+            async for wf_res in finance_wf.run(user_message, model_id=model_id):
+                if isinstance(wf_res, dict) and wf_res.get("type") == "status":
+                    yield wf_res
+                elif isinstance(wf_res, dict) and wf_res.get("type") == "result":
+                    result_content = wf_res.get("final_report", "Finance task completed.")
             result_model_used = model_id
             result_token_count = 0  # Trading desk manages its own internal token metrics
             fallback_occurred = False
             fallback_from = None
         else:
-            result_content, result_model_used, result_token_count, fallback_occurred, fallback_from = await agent.run(messages, model_id=model_id)
+            result_content = ""
+            result_model_used = model_id
+            result_token_count = 0
+            fallback_occurred = False
+            fallback_from = None
+            
+            async for item in agent.run(messages, model_id=model_id):
+                if isinstance(item, dict) and item.get("type") == "status":
+                    yield item
+                elif isinstance(item, tuple) and len(item) == 5:
+                    result_content, result_model_used, result_token_count, fallback_occurred, fallback_from = item
+                    yield {"type": "content", "content": result_content}
+                else:
+                    pass
 
         # 4. Save
         try:
@@ -545,7 +571,7 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
 
         await self._check_context_window(conversation_id, model_id)
 
-        return OrchestratorResponse(
+        yield OrchestratorResponse(
             response=result_content,
             conversation_id=conversation_id,
             extracted_facts=[],
