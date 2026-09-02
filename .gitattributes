@@ -1,2 +1,6 @@
+demo_vids/*.mp4 filter=lfs diff=lfs merge=lfs -text
+demo_vids/*.mov filter=lfs diff=lfs merge=lfs -text
+demo_vids/*.avi filter=lfs diff=lfs merge=lfs -text
+demo_vids/*.webm filter=lfs diff=lfs merge=lfs -text
 demo_vids/** filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
