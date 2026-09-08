@@ -1,137 +1,191 @@
-# BuddyOS 🤖
+# BuddyOS 🤖 — Runbook & Setup Guide
 
-![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)
-![Version](https://img.shields.io/badge/version-0.1.0-green.svg)
+BuddyOS is a model-agnostic, multi-agent AI orchestrator. It acts as a personal "buddy" that remembers facts about you across sessions, routes requests across multiple LLM providers with automatic fallback, grounds answers in your own local documents (RAG), and delegates specialized work (academic research, financial analysis) to dedicated sub-agents.
 
-BuddyOS is a highly flexible, model-agnostic AI assistant and orchestrator. It is designed to act as a personal "buddy" that continuously learns about you, maintains context across sessions, and dynamically routes your queries to the best available AI models.
+This document is a practical runbook: what the system does, how to install it in your own workspace, and how to use it day-to-day.
 
-## ✨ Key Features
+---
 
-- **Robust Tool Orchestration**: Designed with `max_steps` loop constraints and explicit null-type handling to gracefully prevent infinite tool-calling loops, especially when using complex models like GPT-5.
-- **Model-Agnostic Routing**: Powered by [LiteLLM](https://github.com/BerriAI/litellm), BuddyOS can discover available models dynamically based on your environment keys. It supports automated token counting and a **graceful fallback chain** (if one model goes down, it switches to the next available).
-- **Hybrid Persistence Layer**:
-  - **SQLite** (`aiosqlite`): Transactional tracking of conversations, message history, timestamp updates, and token usage limits.
-  - **DuckDB**: Analytical engine for lightning-fast retrieval of learned "User Facts".
-- **RAG-Powered Memory (Semantic Fact Retrieval)**: Buddy embeds every learned fact locally using `fastembed` (ONNX Runtime, no PyTorch required). At each turn, it runs a DuckDB VSS cosine-similarity search to inject only the top-5 most relevant facts into the system prompt — keeping context lean and precise.
-- **Continuous Learning (Automated Fact Extraction)**: Buddy constantly evaluates your conversations in the background. It extracts information about you (e.g., job, preferences, name) and stores them as active facts to customize future system prompts.
-- **Dynamic Context Window Management**: Constantly monitors context tokens and triggers summarization when the context threshold (~75%) is reached, preventing the LLM from forgetting the start of a long conversation.
-- **Real-Time Web Search & Tool Calling**: Buddy is equipped with an integrated web search tool using DuckDuckGo (`ddgs`) and an academic search tool using ArXiv (with advanced XML parsing and robust network timeouts). When asked about recent events or complex academic topics, it dynamically pauses the conversation, searches the web or literature, and integrates the live results into its final answer seamlessly.
-- **Advanced Multi-Agent Finance Workflow (Trading Desk)**: A specialized 4-stage analytical pipeline designed for institutional-grade stock and market analysis. It features a secure smart-routing regex/LLM cascade to flawlessly differentiate between standard academic/general inquiries and real-time financial scopes. The pipeline operates sub-agents sequentially:
-  - **Scraper**: Gathers live macroeconomic and sector-specific news using integrated search tools.
-  - **Processor**: Evaluates the raw data to extract core macroeconomic sentiment (Bullish/Bearish/Neutral).
-  - **Matcher**: Fuses live quantitative stock ticker data with the qualitative macro sentiment.
-  - **Validator**: Acts as a strict compliance officer to format the fused data into an institutional-grade Markdown report with necessary financial disclaimers.
-- **Local Document Grounding (Personal RAG)**: Native support for ingesting and querying your local files! You can parse `.txt`, `.md`, `.csv`, `.pdf`, and `.docx` files directly via the UI's document uploader. The text is chunked (512 tokens with overlap) and embedded directly into DuckDB using `fastembed`. To search it, simply include words like "document", "pdf", or "file" in your chat message, and Buddy will dynamically inject the relevant chunks straight into the context.
-- **Interactive Streamlit UI**: A modern, feature-rich chat interface that provides:
-  - **Dynamic Chat Management**: Create new chats, see auto-generated concise summaries for previous chats in the sidebar, and switch between them effortlessly.
-  - **Scrollable Layouts**: Ergonomic, fixed-height bounded scroll areas ensuring the input bar stays pinned to the viewport bottom (just like your favorite commercial tools).
-  - **Data Privacy & Control**: Explicit UI buttons to obliterate and hard-delete all conversations (`Clear All Chats`), facts (`Clear All Facts`), and ingested documents (`Clear All Documents`) directly from SQLite/DuckDB.
-  - **Word-by-word Streaming**: Real-time asynchronous text streaming over the LiteLLM router.
-  - **Interruption Mechanisms (Kill Switch)**: An inline `🛑 Stop Generating` button allows you to sever the model connection midway, abandoning incomplete queries without polluting your context history or DB.
-- **Interactive CLI**: Optionally comes with an interactive terminal interface equipped with commands (`/facts`, `/history`, `/model`, `/new`, `/ingest`) to manage your Buddy context easily headless.
+## 1. What BuddyOS Does (Functional Overview)
 
-## 🛠 Tech Stack
+| Capability                                  | Summary                                                                                                                                                                                                                                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Model-agnostic routing**                  | Uses [LiteLLM](https://github.com/BerriAI/litellm) to discover which models you can use based on the API keys present in your `.env`, and falls back automatically to the next available model if one fails.                                                                         |
+| **Hybrid persistence**                      | SQLite (`aiosqlite`) stores conversations/messages transactionally; DuckDB stores "User Facts" and document embeddings for analytical/vector lookups.                                                                                                                                |
+| **Continuous learning (fact memory)**       | Buddy silently extracts facts about you (job, preferences, name, etc.) from conversation in the background and stores them as active facts, later injecting only the top-k most relevant facts (via cosine similarity search, `fastembed` + DuckDB VSS/HNSW) into the system prompt. |
+| **Context window management**               | Tracks token usage and, once ~75% of the context window is used, automatically compresses the oldest half of the conversation into a dense summary block instead of just warning.                                                                                                    |
+| **Local document grounding (Personal RAG)** | Ingest `.txt`, `.md`, `.csv`, `.pdf`, `.docx` files (via `/ingest` in the CLI or the uploader in the UI). Files are chunked, embedded with `fastembed` (`BAAI/bge-small-en-v1.5`, ONNX, no PyTorch), and retrieved into context when your message references a document.             |
+| **Plugin-based tool system**                | Tools live as independent, auto-registering modules under `plugins/` (web search via DuckDuckGo, ArXiv search, finance data, agent delegation) and are decorated with `@plugin(...)` in `core/tools.py`'s `ToolRegistry`.                                                            |
+| **Multi-agent delegation**                  | A Buddy agent handles general chat, a Researcher agent handles rigorous academic queries (ArXiv-only, zero-hallucination guardrails), and a 4-stage Finance Workflow (Scraper → Processor → Matcher → Validator) produces institutional-style market reports.                        |
+| **Streamlit UI**                            | Full graphical chat interface: streaming responses, a "Stop Generating" kill switch, sidebar chat history, a Facts viewer, a document ingestion panel, and buttons to purge chats/facts/documents.                                                                                   |
+| **Interactive CLI**                         | A terminal-based chat client with the same core memory/routing engine, useful for headless or quick usage.                                                                                                                                                                           |
+
+---
+
+## 2. Demo Videos
+
+Recorded walkthroughs of the core functionality are available in [`demo_vids/`](demo_vids):
+
+- [`fact_extraction.mp4`](demo_vids/fact_extraction.mp4) — background fact learning and memory recall across turns.
+- [`document_ingestion.mp4`](demo_vids/document_ingestion.mp4) — uploading and querying local documents (Personal RAG).
+- [`tools_functionality.mp4`](demo_vids/tools_functionality.mp4) — web search, ArXiv research delegation, and finance tool calls.
+- [`final_ui_and_purge_functionality.mp4`](demo_vids/final_ui_and_purge_functionality.mp4) — the Streamlit UI, streaming, and the data-purge controls (clear chats/facts/documents).
+
+Watch these first if you want to see expected behavior before running the app yourself.
+
+---
+
+## 3. Tech Stack
 
 - **Language**: Python 3.12+
-- **Frameworks**: Pydantic-AI (Agent logic), LiteLLM (Routing/Tokenization)
-- **Tools Integrations**: `ddgs` (DuckDuckGo Search)
-- **Database**: SQLite (`aiosqlite`), DuckDB + VSS extension (HNSW vector index)
-- **Embeddings**: [`fastembed`](https://github.com/qdrant/fastembed) — `BAAI/bge-small-en-v1.5` (384-dim, ONNX Runtime, no PyTorch)
-- **Frontend**: Streamlit-based graphical user interface (`uv run streamlit run ui/app.py`).
+- **Agent/Routing frameworks**: Pydantic-AI, LiteLLM
+- **Databases**: SQLite (`aiosqlite`) for conversations/messages, DuckDB (+ VSS extension, HNSW index) for facts and document chunks
+- **Embeddings**: `fastembed` — `BAAI/bge-small-en-v1.5` (384-dim, ONNX Runtime)
+- **Tool integrations**: `ddgs` (DuckDuckGo search), ArXiv API, `yfinance` (live stock data)
+- **Document parsing**: `pypdf`, `python-docx`
+- **Frontend**: Streamlit
+- **Package manager**: [`uv`](https://github.com/astral-sh/uv) (an `uv.lock` is committed; `pip` also works)
 
-## 🚀 Getting Started
+---
 
-### Prerequisites
+## 4. Cloning & Setting Up Your Own Workspace
+
+### 4.1 Prerequisites
 
 - Python 3.12 or newer
-- An API key for at least one supported LLM (e.g., `GEMINI_API_KEY`, `OPENAI_API_KEY`).
+- Git
+- At least one LLM API key (e.g. Gemini, OpenAI, Anthropic, Groq, or OpenRouter) — Gemini has a usable free tier and is the default fallback model.
 
-### Installation
+### 4.2 Clone the repository
 
-1. Clone the repository and navigate to the project root:
+```bash
+git clone <your-fork-or-repo-url>.git
+cd buddy-os
+```
 
-   ```bash
-   cd buddy-os
-   ```
+> The project root (containing `pyproject.toml`, `main.py`, `.gitignore`) is the `buddy-os/` folder — run all commands from inside it.
 
-2. Create a virtual environment and activate it:
+### 4.3 Create a virtual environment and install dependencies
 
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
+Using `uv` (recommended, matches the committed `uv.lock`):
 
-3. Install the dependencies:
+```bash
+uv sync
+```
 
-   ```bash
-   pip install -e .
-   ```
+Or with plain `pip`:
 
-4. **Embedding model** (for RAG memory):
+```bash
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
 
-   BuddyOS uses [`BAAI/bge-small-en-v1.5`](https://huggingface.co/Qdrant/bge-small-en-v1.5-onnx-Q) (~66 MB, ONNX format) for local semantic search. The model is **downloaded automatically on first run** via `fastembed` and cached to `data/fastembed_cache/`. No manual step is required.
+pip install -e .
+```
 
-   If automatic download fails (e.g., restricted network), download it manually:
+### 4.4 Configure API keys
 
-   ```bash
-   python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='data/fastembed_cache')"
-   ```
+Create a `.env` file in the `buddy-os/` project root (this file is gitignored — never commit it):
 
-   > **Note:** The model cache is excluded from version control (`.gitignore`). Each developer downloads it once on first run.
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+```
 
-5. Create a `.env` file in the root directory and add your API keys:
-   ```env
-   GEMINI_API_KEY=your_gemini_api_key_here
-   OPENAI_API_KEY=your_openai_api_key_here
-   ```
+You only need one key configured for BuddyOS to run — it discovers whichever providers are configured at startup and lists their models. Never share or commit real API key values; rotate any key that is accidentally exposed.
 
-### Running BuddyOS
+### 4.5 Embedding model (for RAG / fact memory)
 
-To launch the graphical web UI using Streamlit:
+BuddyOS uses `BAAI/bge-small-en-v1.5` (~66 MB, ONNX) for semantic search. It downloads automatically on first run into `data/fastembed_cache/` (gitignored). If your network blocks the automatic download, fetch it manually:
+
+```bash
+python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='data/fastembed_cache')"
+```
+
+### 4.6 Data directories
+
+`data/` (SQLite/DuckDB files, ingested documents, embedding cache) and `logs/` are created automatically on first run and are gitignored — no manual setup required.
+
+---
+
+## 5. Running BuddyOS
+
+### Streamlit UI (recommended)
 
 ```bash
 uv run streamlit run ui/app.py
 ```
 
-Or run the interactive CLI application:
+or, if using a plain venv:
+
+```bash
+streamlit run ui/app.py
+```
+
+This opens the chat UI with the sidebar (chat history), the main chat panel, and a right-hand panel with tabs for **Memory Facts** and **Local Documents**.
+
+### Interactive CLI
 
 ```bash
 python main.py
 ```
 
-### CLI Commands
+The CLI supports the following in-chat commands:
 
-Inside the chat loop, you can use the following commands:
+- `/help` — show available commands
+- `/facts` — view what Buddy currently knows about you
+- `/model` — switch the active AI model
+- `/new` — start a fresh conversation
+- `/history` — view recent conversations
+- `/ingest` — map a local file (`.txt`, `.md`, `.pdf`, `.csv`, `.docx`) for searching
+- `/exit` — save state and exit gracefully
 
-- `/help` - Show available commands
-- `/facts` - View what Buddy actively knows about you
-- `/model` - Switch the current AI model on the fly
-- `/new` - Start a fresh conversation
-- `/history` - View a list of your recent conversations- `/ingest` - Map a local file for searching (.txt, .md, .pdf, .csv, .docx)- `/exit` - Save state and gracefully exit
+---
 
-## 📂 Project Structure
+## 6. Using BuddyOS
+
+- **General chat**: just type — Buddy remembers facts you share and recalls the most relevant ones automatically each turn.
+- **Web search / recent info**: ask about current events; Buddy calls the `web_search` tool automatically.
+- **Academic research**: ask for peer-reviewed papers or deep academic topics; Buddy delegates to the Researcher agent, which is restricted to ArXiv-sourced, cited answers only.
+- **Finance / market analysis**: ask stock or macro questions; the request is routed through the 4-stage Finance Workflow (news scraping → sentiment analysis → live quant data matching → compliance-formatted report with disclaimer).
+- **Document grounding**: upload a file via the UI's "Local Documents" tab (or `/ingest` in the CLI), then reference words like "document", "file", or "pdf" in your message to have relevant chunks injected into context.
+- **Data control**: in the UI, use "Clear All Chats", "Clear All Facts", or "Clear All Documents" to hard-delete the corresponding data from SQLite/DuckDB.
+
+---
+
+## 7. Project Structure
 
 ```
 buddy-os/
-├── agents/             # Pydantic-AI orchestrator definitions (Buddy agent)
-├── core/               # Core engine (LiteLLM router, Hybrid DB manager, embeddings)
-│   ├── orchestrator.py   # Main Pydantic-AI orchestrator logic
-│   ├── router.py         # Multi-model router with tool & fallback mechanisms
-│   ├── tools.py          # Extensible tool registry & duckduckgo web_search implementation
-│   └── database.py       # DuckDB & SQLite persistence logic
-├── data/               # Local persistence layer (.db and .duckdb generated here)
-│   └── fastembed_cache/  # Auto-downloaded ONNX embedding model (gitignored)
-├── ui/                 # Streamlit UI logic (WIP)
-├── main.py             # CLI Entry point
-└── pyproject.toml      # Project definitions & dependencies
+├── agents/             # Agent entry points (buddy.py re-exports the orchestrator, finance.py = Finance Workflow)
+├── core/               # Core engine
+│   ├── orchestrator.py   # Main supervisor logic, Buddy/Researcher agents, fact extraction
+│   ├── router.py         # LiteLLM-backed router with fallback chain
+│   ├── tools.py          # ToolRegistry: plugin discovery + execution with retry/backoff
+│   ├── database.py       # SQLite + DuckDB hybrid persistence
+│   ├── embeddings.py      # fastembed wrapper for vector generation
+│   ├── document_parser.py # PDF/DOCX/TXT/MD/CSV parsing + chunking
+│   ├── discovery.py       # API key / model discovery
+│   └── fact_utils.py       # Fact normalization/contradiction handling
+├── plugins/            # Auto-registered tools (web_search, arxiv_search, finance_tools, delegation tools)
+├── ui/                  # Streamlit UI (app.py + components/: chat, sidebar, facts_viewer, document_ingestor)
+├── data/                # Generated at runtime: SQLite/DuckDB files, ingested documents, embedding cache (gitignored)
+├── logs/                # Rotating log files (gitignored)
+├── demo_vids/           # Recorded feature walkthroughs (see section 2)
+├── main.py              # CLI entry point
+└── pyproject.toml       # Project metadata & dependencies
 ```
 
-## 🔄 Recent Changes & Fixes
+---
 
-- **Interactive Streamlit UI Upgrade**: Completely overhauled the presentation layer. It now supports word-by-word streaming, scrollable bounded chat contexts decoupled from viewport scrolling, dynamic chat titles auto-generated by the LLM backbone, and direct controls to purge and manage underlying database footprint data.
-- **Rolling Summarization (Context Window Management)**: Moving beyond simply warning you when context thresholds hit ~75%, BuddyOS now actively manages token footprints. Once the limit is met, Buddy automatically compresses the oldest 50% of the conversation history into a dense `SYSTEM MEMORY` block, discarding raw verbose text but retaining the core logical flow entirely seamlessly.
-- **Plugin-Based Tool Decoupling**: The previous tool implementations hardcoded in `core/tools.py` have been transitioned to a modular, decoupled plugin architecture (housed in the `plugins/` directory). Individual tools and sub-agents are constructed as independent classes that auto-register tightly with the runtime upon startup, unlocking a vastly expanded multi-agent ecosystem.
-- **Thread-safe Analytical Persistence**: Implemented strict `asyncio.Lock()` boundaries around all DuckDB interactions. This securely handles concurrent read/writes between the main thread and background LLM fact extraction threads, eliminating pending query lock crashes.
-- **UUID-based Key Generation**: Decoupled DuckDB's unique identifier constraints from non-deterministic LLM generation, ensuring stable collision-free database memory inserts.
-- **Hardened Fact Contradiction Logic**: Refined the hybrid RAG background extraction bounds to intelligently update mutually exclusive facts (e.g., correcting "Red Corolla" to "Silver Corolla") whilst ensuring independent historical or future plans are not unwarrantedly wiped by aggressive overriding.
-- **Local Document Grounding (Personal RAG)**: Transitioned from roadmap to active feature! Support for parsing `.txt`, `.md`, `.csv`, `.pdf`, and `.docx` via `/ingest`, integrating text chunking, SHA256 hashed deduplication, and fast HNSW vector lookup for secure standalone querying.
+## 8. Troubleshooting
+
+- **"No API keys configured" on startup**: ensure `.env` exists in `buddy-os/` with at least one valid, non-placeholder key.
+- **Embedding model fails to download**: run the manual `fastembed` download command in section 4.5, or check outbound network access to Hugging Face.
+- **DuckDB VSS extension unavailable**: BuddyOS automatically falls back to a full fact scan (slower semantic search) instead of the HNSW index; functionality is unaffected.
+- **Logs**: check `logs/buddy-os.log` for detailed DEBUG-level output; the console only shows WARNING+.
