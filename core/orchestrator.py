@@ -43,10 +43,21 @@ class FactExtractionSchema(BaseModel):
 
 
 class BaseAgent:
+    # Reasoning models (GPT-5, o-series) spend part of max_tokens on hidden
+    # reasoning tokens before emitting visible content, so they need a much
+    # larger budget than standard chat models to avoid returning empty text.
+    REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
     def __init__(self, agent_name: str, router: BuddyRouter, tool_registry: ToolRegistry):
         self.agent_name = agent_name
         self.router = router
         self.tool_registry = tool_registry
+
+    def _max_tokens_for(self, model_id: str) -> int:
+        model_name = model_id.rsplit("/", 1)[-1].lower()
+        if model_name.startswith(self.REASONING_MODEL_PREFIXES):
+            return 6000
+        return 2000
 
     async def run(self, messages: list, model_id: str, temperature: float = 0.7, max_steps: int = 5):
         tools = self.tool_registry.get_tools_for_agent(self.agent_name)
@@ -56,6 +67,7 @@ class BaseAgent:
         fallback_occurred = False
         fallback_from = None
         step_count = 0
+        max_tokens = self._max_tokens_for(model_id)
         
         while step_count < max_steps:
             kwargs = {}
@@ -66,7 +78,7 @@ class BaseAgent:
                 model_id=model_id,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=2000,
+                max_tokens=max_tokens,
                 **kwargs
             )
             
@@ -116,6 +128,33 @@ class BaseAgent:
         # In step max_steps, we strip tools, forcing a text return, but if that still returns empty:
         if not result_content and result and result.content:
             result_content = result.content
+
+        # Reasoning models can still exhaust their token budget on hidden reasoning
+        # with nothing visible left over. Retry once with a much larger budget and
+        # no tools before giving up, so the user never sees a silent empty reply.
+        if not (result_content or "").strip():
+            logger.warning(
+                "%s produced empty content for %s — retrying once with a larger token budget.",
+                self.agent_name, result_model_used
+            )
+            retry_result = await self.router.get_completion(
+                model_id=model_id,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max(max_tokens * 2, 8000),
+            )
+            result_model_used = retry_result.model_used
+            result_token_count += retry_result.token_count
+            if retry_result.fallback_occurred:
+                fallback_occurred = True
+                fallback_from = retry_result.fallback_from
+            result_content = retry_result.content
+
+        if not (result_content or "").strip():
+            result_content = (
+                "Sorry — I generated a response but it came back empty. "
+                "Please try asking again, or rephrase your question."
+            )
             
         yield result_content or "", result_model_used, result_token_count, fallback_occurred, fallback_from
 

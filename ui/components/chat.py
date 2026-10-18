@@ -14,9 +14,13 @@ def render_chat(user_input=None):
     db = st.session_state.db
     orchestrator = st.session_state.orchestrator
 
-    # Initialise stop flag on first run
+    # Initialise flags on first run
     if "stop_generation" not in st.session_state:
         st.session_state.stop_generation = False
+    if "pending_user_message" not in st.session_state:
+        st.session_state.pending_user_message = None
+    if "is_generating" not in st.session_state:
+        st.session_state.is_generating = False
 
     # ── Stop-generation handler ────────────────────────────────────────────────
     # Runs at the TOP of the render triggered by the 🛑 button click.
@@ -41,6 +45,8 @@ def render_chat(user_input=None):
             st.session_state.messages = msgs[:-1]
             
         st.session_state.stop_generation = False
+        st.session_state.pending_user_message = None
+        st.session_state.is_generating = False
         st.rerun()
         return
     # ────────────────────────────────────────────────────────────────────────
@@ -49,10 +55,22 @@ def render_chat(user_input=None):
     if st.session_state.conversation_id and not st.session_state.messages:
         st.session_state.messages = run_async(db.get_messages(st.session_state.conversation_id))
 
+    # Step 1: a brand-new submission just arrived. Append the user message once,
+    # stash it as "pending", and rerun immediately. This guarantees the
+    # generation step below only ever runs in a dedicated rerun — never twice
+    # for the same submission — and the history loop is the single source of
+    # truth for everything that's rendered.
+    if user_input and not st.session_state.pending_user_message and not st.session_state.is_generating:
+        if isinstance(st.session_state.messages, list):
+            st.session_state.messages.append({"role": "user", "content": user_input})
+        st.session_state.pending_user_message = user_input
+        st.rerun()
+        return
+
     # Plain container — no fixed height. Messages grow naturally and the page
     # scrolls; the pinned top-level st.chat_input stays at the viewport bottom.
     with st.container():
-        if not st.session_state.messages and not user_input:
+        if not st.session_state.messages:
             st.info("👋 Hello! I am Buddy. Ask me anything or share something about yourself!")
         else:
             for msg in st.session_state.messages:
@@ -61,12 +79,12 @@ def render_chat(user_input=None):
                 with st.chat_message(role):
                     st.markdown(content)
 
-        if user_input:
-            # 1. Show user message immediately
-            with st.chat_message("user"):
-                st.markdown(user_input)
-            if isinstance(st.session_state.messages, list):
-                st.session_state.messages.append({"role": "user", "content": user_input})
+        # Step 2: generate the reply for the pending user message. Guarded by
+        # is_generating so a stray duplicate rerun mid-flight can't trigger a
+        # second LLM call / second append for the same turn.
+        if st.session_state.pending_user_message and not st.session_state.is_generating:
+            pending_message = st.session_state.pending_user_message
+            st.session_state.is_generating = True
 
             with st.chat_message("assistant"):
                 # 2. Add an explicit 'stop' button above the chat stream.
@@ -74,7 +92,7 @@ def render_chat(user_input=None):
                 # the button text from wrapping vertically inside tight column constraints.
                 st.button(
                     "🛑 Stop Generating",
-                    key=f"stop_{id(user_input)}",
+                    key=f"stop_{id(pending_message)}",
                     help="Cancel & discard this response",
                     type="secondary",
                     on_click=lambda: st.session_state.update({"stop_generation": True}),
@@ -86,7 +104,7 @@ def render_chat(user_input=None):
                 try:
                     response = None
                     gen = orchestrator.process_message(
-                        user_message=user_input,
+                        user_message=pending_message,
                         conversation_id=st.session_state.conversation_id,
                         model_id=st.session_state.current_model_id,
                     )
@@ -94,6 +112,10 @@ def render_chat(user_input=None):
                     for item in run_async_gen(gen):
                         if isinstance(item, dict) and item.get("type") == "status":
                             status_container.write(item["msg"])
+                        elif isinstance(item, dict) and item.get("type") == "content":
+                            # Intermediate content marker from the orchestrator — not the
+                            # final response object, so don't treat it as one.
+                            pass
                         else:
                             response = item
                             
@@ -108,6 +130,8 @@ def render_chat(user_input=None):
                         and st.session_state.messages[-1].get("role") == "user"
                     ):
                         st.session_state.messages.pop()
+                    st.session_state.pending_user_message = None
+                    st.session_state.is_generating = False
                     return
 
                 # If Stop was clicked during thinking, discard now without streaming
@@ -137,3 +161,6 @@ def render_chat(user_input=None):
                         f"Learned {len(response.extracted_facts)} new fact(s) about you!",
                         icon="✨",
                     )
+
+            st.session_state.pending_user_message = None
+            st.session_state.is_generating = False
