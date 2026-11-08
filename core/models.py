@@ -22,90 +22,96 @@ class ModelInfo:
     max_tokens: int = 4096  # Maximum output tokens per response
 
 
-# Model Registry - March 2026 supported models
+@dataclass(frozen=True)
+class ContextPreset:
+    """UI/CLI-selectable context size: what each request carries and when old turns get summarized."""
+    label: str
+    window_tokens: int  # Rolling summarization starts at 75% of this
+    history_budget: int  # Max tokens of history sent per request
+    recent_messages: int  # Newest messages always sent, even over budget
+
+
+# Window >> history budget, otherwise the 75% summarization trigger would fire every turn
+CONTEXT_PRESETS: Dict[str, ContextPreset] = {
+    "small": ContextPreset("Small", window_tokens=8_000, history_budget=2_000, recent_messages=3),
+    "large": ContextPreset("Large", window_tokens=32_000, history_budget=6_000, recent_messages=8),
+}
+DEFAULT_CONTEXT_SIZE = "large"
+
+
+def resolve_context_window(model: Optional[ModelInfo], context_size: str) -> int:
+    """Preset window, capped by what the model actually supports."""
+    window = CONTEXT_PRESETS[context_size].window_tokens
+    return min(window, model.context_window) if model else window
+
+
+DEFAULT_MODEL_ID = "gemini/gemini-3.8-flash"  # UI/CLI default; balanced, free tier
+FALLBACK_MODEL_ID = "gemini/gemini-3.5-flash-lite"  # Router last resort and Gemini background tasks; cheapest, free tier
+
+# Model Registry - small / balanced / large per provider, verified against provider docs on 2026-10-30
 MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
     "anthropic": [
         ModelInfo(
-            model_id="claude-opus-4-6-20250514",
+            model_id="claude-haiku-5-5",
             provider="anthropic",
-            display_name="Claude 4.6 Opus",
+            display_name="Claude Haiku 5.5 (Small)",
             requires_key="ANTHROPIC_API_KEY",
-            description="Most capable model for complex tasks",
+            description="Cheapest Claude; high-volume, latency-sensitive tasks",
             tier="paid",
-            context_window=1000000,  # 1M tokens
-            max_tokens=128000  # 128K max output
+            context_window=1_000_000,
+            max_tokens=128_000
         ),
         ModelInfo(
-            model_id="claude-sonnet-4-6-20250514",
+            model_id="claude-sonnet-5-5",
             provider="anthropic",
-            display_name="Claude 4.6 Sonnet",
+            display_name="Claude Sonnet 5.5 (Balanced)",
             requires_key="ANTHROPIC_API_KEY",
-            description="Balanced performance and speed",
+            description="Best mix of speed, intelligence and cost",
             tier="paid",
-            context_window=1000000,  # 1M tokens
-            max_tokens=64000  # 64K max output
+            context_window=1_000_000,
+            max_tokens=128_000
         ),
         ModelInfo(
-            model_id="claude-sonnet-4-5-20250514",
+            model_id="claude-opus-5-5",
             provider="anthropic",
-            display_name="Claude Sonnet 4.5",
+            display_name="Claude Opus 5.5 (Large)",
             requires_key="ANTHROPIC_API_KEY",
-            description="Previous generation Sonnet model",
+            description="Highest capability for long-running agentic and knowledge work; most expensive",
             tier="paid",
-            context_window=200000,  # 200K tokens (1M in beta)
-            max_tokens=64000  # 64K max output
-        ),
-        ModelInfo(
-            model_id="claude-3-7-sonnet-20250219",
-            provider="anthropic",
-            display_name="Claude 3.7 Sonnet",
-            requires_key="ANTHROPIC_API_KEY",
-            description="Claude 3.x series Sonnet",
-            tier="paid",
-            context_window=200000,  # 200K tokens
-            max_tokens=16000  # 16K max output
-        ),
-        ModelInfo(
-            model_id="claude-3-5-haiku-20241022",
-            provider="anthropic",
-            display_name="Claude 3.5 Haiku",
-            requires_key="ANTHROPIC_API_KEY",
-            description="Fast and cost-effective Claude 3.5 variant",
-            tier="paid",
-            context_window=200000,  # 200K tokens
-            max_tokens=8192  # 8K max output
+            context_window=1_000_000,
+            max_tokens=128_000
         ),
     ],
     "openai": [
         ModelInfo(
-            model_id="gpt-5",
+            model_id="gpt-6-luna",
             provider="openai",
-            display_name="GPT-5",
+            display_name="GPT-6 Luna (Small)",
             requires_key="OPENAI_API_KEY",
-            description="OpenAI's flagship model",
+            description="Most efficient GPT-6; focused, high-volume tasks",
             tier="paid",
-            context_window=1050000,  # 1.05M tokens (GPT-5.4)
-            max_tokens=16000  # 16K max output
+            context_window=1_050_000,
+            max_tokens=128_000
         ),
         ModelInfo(
-            model_id="gpt-4o",
+            model_id="gpt-6.1-sol",
             provider="openai",
-            display_name="GPT-4o",
+            display_name="GPT-6.1 Sol (Balanced)",
             requires_key="OPENAI_API_KEY",
-            description="Optimized GPT-4 variant",
+            description="Near-flagship performance at a much lower cost",
             tier="paid",
-            context_window=128000,  # 128K tokens
-            max_tokens=16000  # 16K max output
+            context_window=1_050_000,
+            max_tokens=128_000
         ),
         ModelInfo(
-            model_id="gpt-4o-mini",
+            model_id="gpt-6-astra",
             provider="openai",
-            display_name="GPT-4o Mini",
+            display_name="GPT-6 Astra (Large)",
             requires_key="OPENAI_API_KEY",
-            description="Fast and cost-effective GPT-4o variant",
+            description="Flagship for the most demanding reasoning and coding; most expensive",
             tier="paid",
-            context_window=128000,  # 128K tokens
-            max_tokens=16000  # 16K max output
+            context_window=1_050_000,
+            max_tokens=128_000
         ),
     ],
     "xai": [
@@ -122,34 +128,34 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
     ],
     "google": [
         ModelInfo(
-            model_id="gemini/gemini-2.5-flash",  # ✅ Actual Google API name (stable)
+            model_id="gemini/gemini-3.5-flash-lite",
             provider="google",
-            display_name="Gemini 2.5 Flash",
+            display_name="Gemini 3.5 Flash-Lite (Small)",
             requires_key="GEMINI_API_KEY",
-            description="Fast and efficient model (stable, recommended)",
+            description="Cheapest Gemini; high-volume agentic tasks (free tier available)",
             tier="free",
-            context_window=1000000,  # 1M tokens
-            max_tokens=64000  # 64K max output
+            context_window=1_048_576,
+            max_tokens=65_536
         ),
         ModelInfo(
-            model_id="gemini/gemini-3.1-flash-lite-preview",  # ✅ Actual Google API name
+            model_id="gemini/gemini-3.8-flash",
             provider="google",
-            display_name="Gemini 3.1 Flash Lite",
+            display_name="Gemini 3.8 Flash (Balanced)",
             requires_key="GEMINI_API_KEY",
-            description="Lightweight and ultra-efficient (preview)",
+            description="Most intelligent Flash; best cost/performance (free tier available)",
             tier="free",
-            context_window=1000000,  # 1M tokens
-            max_tokens=32000  # 32K max output
+            context_window=1_048_576,
+            max_tokens=65_536
         ),
         ModelInfo(
-            model_id="gemini/gemini-3.1-pro-preview",  # ✅ Actual Google API name
+            model_id="gemini/gemini-4-argon",
             provider="google",
-            display_name="Gemini 3.1 Pro",
+            display_name="Gemini 4 Argon (Large)",
             requires_key="GEMINI_API_KEY",
-            description="Advanced reasoning capabilities (preview, requires Pro plan)",
+            description="Flagship reasoning model; not on the free tier, most expensive",
             tier="paid",
-            context_window=2000000,  # 2M tokens!
-            max_tokens=65536  # 65K max output
+            context_window=1_048_576,
+            max_tokens=1_048_576
         ),
     ],
     "groq": [
