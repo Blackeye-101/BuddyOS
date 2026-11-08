@@ -2,13 +2,15 @@
 import json
 import logging
 import re
-from typing import List, Optional
+from typing import AsyncIterator, List, Optional, Union
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
 from core.database import BuddyDatabase, UserFact
+from core.discovery import get_model_by_id
 from core.embeddings import generate_embedding_safe
+from core.models import DEFAULT_CONTEXT_SIZE, DEFAULT_MODEL_ID, get_context_preset, resolve_context_window
 from core.router import BuddyRouter
 from core.tools import ToolRegistry
 
@@ -18,6 +20,7 @@ class OrchestratorRequest(BaseModel):
     user_message: str
     conversation_id: Optional[str] = None
     model_id: str
+    context_size: str = DEFAULT_CONTEXT_SIZE
 
 
 class OrchestratorResponse(BaseModel):
@@ -42,25 +45,60 @@ class FactExtractionSchema(BaseModel):
     deactivate_fact_ids: List[str] = Field(default_factory=list, description="UUIDs of existing facts that are explicitly contradicted and should be removed")
 
 
-class BaseAgent:
-    # Reasoning models (GPT-5, o-series) spend part of max_tokens on hidden
-    # reasoning tokens before emitting visible content, so they need a much
-    # larger budget than standard chat models to avoid returning empty text.
-    REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+# Header of the system row that holds a conversation's rolling summary
+MEMORY_HEADER = "[SYSTEM MEMORY: Condensed history of earlier conversation]"
 
+# Appended when an agent has used all its tool steps and must answer in text
+FINAL_STEP_NOTE = (
+    "You have used all available tool steps. Answer now using the information already "
+    "gathered; do not call any tool."
+)
+
+# System prompt for Buddy when another agent delegates a web search to it
+DELEGATED_BUDDY_PROMPT = (
+    "You are Buddy, a helpful assistant. Use the web_search tool for real-time information "
+    "and answer concisely."
+)
+
+# Upper bound for a delegated agent run, including provider retries and fallbacks
+DELEGATION_TIMEOUT_SECONDS = 180
+
+
+class BaseAgent:
     def __init__(self, agent_name: str, router: BuddyRouter, tool_registry: ToolRegistry):
         self.agent_name = agent_name
         self.router = router
         self.tool_registry = tool_registry
 
     def _max_tokens_for(self, model_id: str) -> int:
-        model_name = model_id.rsplit("/", 1)[-1].lower()
-        if model_name.startswith(self.REASONING_MODEL_PREFIXES):
-            return 6000
-        return 2000
+        # Reasoning models spend part of max_tokens on hidden reasoning before emitting
+        # visible content, so they need a much larger budget to avoid empty replies.
+        model_info = get_model_by_id(model_id)
+        return 6000 if model_info and model_info.reasoning else 2000
 
-    async def run(self, messages: list, model_id: str, temperature: float = 0.7, max_steps: int = 5):
+    def _answer_only_kwargs(self, messages: list, tools: Optional[list]) -> dict:
+        """
+        Call options for a step that must answer in text. Once the history holds tool
+        calls, providers need `tools` declared (Claude rejects the request and Gemini
+        replies empty otherwise), so keep them, forbid new calls and ask for the answer.
+        """
+        if not tools or not any(m.get("tool_calls") for m in messages):
+            return {}
+        if messages[-1].get("content") != FINAL_STEP_NOTE:
+            messages.append({"role": "user", "content": FINAL_STEP_NOTE})
+        return {"tools": tools, "tool_choice": "none"}
+
+    async def run(
+        self,
+        messages: list,
+        model_id: str,
+        temperature: float = 0.7,
+        max_steps: int = 5,
+        allow_delegation: bool = True,
+    ):
         tools = self.tool_registry.get_tools_for_agent(self.agent_name)
+        if tools and not allow_delegation:
+            tools = [t for t in tools if not t["function"]["name"].startswith("delegate_to_")] or None
         result_content = ""
         result_model_used = model_id
         result_token_count = 0
@@ -71,7 +109,9 @@ class BaseAgent:
         
         while step_count < max_steps:
             kwargs = {}
-            if tools and step_count < max_steps - 1:
+            if step_count == max_steps - 1:
+                kwargs = self._answer_only_kwargs(messages, tools)
+            elif tools:
                 kwargs["tools"] = tools
                 
             result = await self.router.get_completion(
@@ -109,7 +149,8 @@ class BaseAgent:
                         None, 
                         self.tool_registry.execute_tool, 
                         function_name, 
-                        function_args
+                        function_args,
+                        {"model_id": model_id},
                     )
                     
                     messages.append({
@@ -125,13 +166,13 @@ class BaseAgent:
             step_count += 1
 
         # GPT-5 and other models might return `content=None` when `tool_calls` are present. 
-        # In step max_steps, we strip tools, forcing a text return, but if that still returns empty:
+        # The last step forbids further tool calls to force a text return, but if that still returns empty:
         if not result_content and result and result.content:
             result_content = result.content
 
         # Reasoning models can still exhaust their token budget on hidden reasoning
         # with nothing visible left over. Retry once with a much larger budget and
-        # no tools before giving up, so the user never sees a silent empty reply.
+        # no new tool calls before giving up, so the user never sees a silent empty reply.
         if not (result_content or "").strip():
             logger.warning(
                 "%s produced empty content for %s — retrying once with a larger token budget.",
@@ -142,6 +183,7 @@ class BaseAgent:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max(max_tokens * 2, 8000),
+                **self._answer_only_kwargs(messages, tools),
             )
             result_model_used = retry_result.model_used
             result_token_count += retry_result.token_count
@@ -171,6 +213,8 @@ class BuddyOrchestrator:
         self.db = database
         self.summarization_threshold = 0.75
         self._background_tasks: set = set()
+        self._summarizing: set = set()  # conversation ids with a summarization already running
+        self._loop: Optional[asyncio.AbstractEventLoop] = None  # lets tool threads schedule agent runs on it
         self.db._normalizer = FactNormalizer(router=router)
         self.tool_registry = ToolRegistry(db=database, router=router, supervisor=self)
         
@@ -179,26 +223,46 @@ class BuddyOrchestrator:
         
         logger.info("Supervisor Orchestrator initialized")
 
-    def run_agent_sync(self, target_agent: str, prompt: str) -> str:
-        """Synchronous wrapper to run an agent from a tool."""
+    def run_agent_sync(self, target_agent: str, prompt: str, model_id: Optional[str] = None) -> str:
+        """Run an agent to completion on behalf of a tool; called from a worker thread."""
         logger.info(f"Handoff from tool to agent: {target_agent}")
         agent = getattr(self, f"{target_agent}_agent", None)
         if not agent:
             return f"Agent {target_agent} not found."
             
-        messages = [{"role": "user", "content": prompt}]
-        # Try to safely execute the async run method
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return "Error: no active event loop available for agent delegation."
         try:
-            loop = asyncio.get_running_loop()
-            import concurrent.futures
-            future = asyncio.run_coroutine_threadsafe(
-                agent.run(messages, "gemini/gemini-2.5-flash"), loop
-            )
-            result = future.result(timeout=60)
-            return result[0]
+            if asyncio.get_running_loop() is loop:
+                return "Error: agent delegation must run outside the event loop thread."
         except RuntimeError:
-            result = asyncio.run(agent.run(messages, "gemini/gemini-2.5-flash"))
-            return result[0]
+            pass  # No running loop in this thread: the expected case for tool threads
+
+        system_prompt = (
+            self._build_researcher_prompt() if target_agent == "researcher" else DELEGATED_BUDDY_PROMPT
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        future = asyncio.run_coroutine_threadsafe(
+            self._run_agent_text(agent, messages, model_id or DEFAULT_MODEL_ID), loop
+        )
+        try:
+            return future.result(timeout=DELEGATION_TIMEOUT_SECONDS)
+        except Exception as e:
+            future.cancel()
+            logger.error(f"Delegation to {target_agent} failed: {e}")
+            return f"Error: delegated agent '{target_agent}' failed: {e}"
+
+    async def _run_agent_text(self, agent: BaseAgent, messages: list, model_id: str) -> str:
+        """Drain an agent run and return its final text. Delegated agents may not delegate again."""
+        text = ""
+        async for item in agent.run(messages, model_id=model_id, allow_delegation=False):
+            if isinstance(item, tuple):
+                text = item[0]
+        return text
 
     def _launch_background_task(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -254,79 +318,125 @@ class BuddyOrchestrator:
 - **Objectivity & Limitations:** Maintain an objective, academic tone.
 """
 
-    async def _load_conversation_context(self, conversation_id: str, query_keywords: Optional[List[str]] = None) -> List[dict]:
+    async def _load_conversation_context(
+        self,
+        conversation_id: str,
+        query_keywords: Optional[List[str]] = None,
+        context_size: str = DEFAULT_CONTEXT_SIZE,
+        summary_tokens: int = 0,
+    ) -> List[dict]:
+        """History for one request, sized by the selected context preset (the summary counts toward its budget)."""
+        preset = get_context_preset(context_size)
         return await self.db.get_recent_history(
-            conversation_id, query_keywords=query_keywords, tier1_limit=5, token_budget=1000
+            conversation_id,
+            query_keywords=query_keywords,
+            tier1_limit=preset.recent_messages,
+            token_budget=max(preset.history_budget - summary_tokens, 0),
         )
+
+    def _keywords_field(self, text: str) -> str:
+        """Comma-sentinel keyword string (',a,b,') that the history recall query matches against."""
+        keywords = self.db._normalizer.extract_keywords(text or "")
+        return f",{','.join(keywords)}," if keywords else ""
+
+    @staticmethod
+    def _build_memory_block(summary) -> str:
+        """System-prompt section carrying the rolling summary of messages no longer sent individually."""
+        if not summary:
+            return ""
+        return f"\n\n## Earlier in This Conversation\n{summary.content}\n"
 
     async def _summarize_oldest_context(self, conversation_id: str, model_id: str) -> None:
         """
-        Summarizes the oldest 50% of the messages to save tokens.
+        Condenses the oldest half of the active conversation into the rolling
+        SYSTEM MEMORY summary. The originals are archived rather than deleted, so
+        the transcript stays intact while the model stops receiving them.
         """
-        messages = await self.db.get_conversation_history(conversation_id)
-        if len(messages) <= 4:
+        messages = await self.db.get_conversation_history(conversation_id, include_archived=False)
+        dialogue = [msg for msg in messages if msg.role != "system"]
+        if len(dialogue) <= 4:
             return
 
-        oldest_messages = await self.db.get_oldest_messages(conversation_id, limit=len(messages) // 2)
-        if not oldest_messages:
+        # Archive whole exchanges: the part that stays must begin on a user turn
+        cut = len(dialogue) // 2
+        while cut < len(dialogue) and dialogue[cut].role != "user":
+            cut += 1
+        if cut >= len(dialogue):
             return
-            
+        to_archive = dialogue[:cut]
+
+        previous = await self.db.get_memory_summary(conversation_id)
         fast_model = self.router.get_fast_model_for_provider(model_id)
-        
-        text_to_summarize = "\n".join([f"{msg.role}: {msg.content}" for msg in oldest_messages if msg.role != "system"])
-        
-        prompt = f"""Summarize the following conversation history chronologically. 
-        Focus on the main topics, facts exchanged, and key decisions.
-        Keep it dense and factual.
-        
-        History:
-        {text_to_summarize}
-        """
-        
+
+        text_to_summarize = "\n".join(f"{msg.role}: {msg.content}" for msg in to_archive)
+        previous_text = previous.content.removeprefix(MEMORY_HEADER).strip() if previous else ""
+        merge_note = (
+            "Merge in this existing summary of the even earlier conversation, "
+            f"so the result is one summary:\n{previous_text}\n\n"
+            if previous_text else ""
+        )
+
+        prompt = (
+            "Summarize the following conversation history chronologically.\n"
+            "Focus on the main topics, facts exchanged, and key decisions.\n"
+            "Keep it dense and factual, in under 400 words.\n\n"
+            f"{merge_note}History:\n{text_to_summarize}\n"
+        )
+
         try:
             result = await self.router.get_completion(
                 model_id=fast_model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1000
+                max_tokens=800
             )
-            
-            summary = result.content
-            
-            message_ids_to_delete = [msg.id for msg in oldest_messages if msg.role != "system"]
-            await self.db.delete_messages(message_ids_to_delete)
-            
+
+            summary = (result.content or "").strip()
+            if not summary:
+                logger.warning("Summarization returned no content; leaving the conversation unchanged.")
+                return
+
             from litellm import token_counter
             try:
                 summary_tokens = token_counter(model=fast_model, text=summary)
             except Exception:
-                summary_tokens = int(len((summary or "").split()) * 1.3)
-                
+                summary_tokens = int(len(summary.split()) * 1.3)
+
             await self.db.save_message(
                 conversation_id=conversation_id,
                 role="system",
-                content=f"[SYSTEM MEMORY: Condensed history of earlier conversation]\n{summary}",
+                content=f"{MEMORY_HEADER}\n{summary}",
                 model_id=fast_model,
                 token_count=summary_tokens
             )
-            
-            logger.info(f"Summarized {len(message_ids_to_delete)} messages into {summary_tokens} tokens using {fast_model}")
-            
+            await self.db.archive_messages([msg.id for msg in to_archive])
+            if previous:
+                await self.db.delete_messages([previous.id])
+
+            logger.info(f"Summarized {len(to_archive)} messages into {summary_tokens} tokens using {fast_model}")
+
         except Exception as e:
             logger.error(f"Failed to summarize context: {e}")
 
-    async def _check_context_window(self, conversation_id: str, model_id: str) -> bool:
+    async def _check_context_window(
+        self, conversation_id: str, model_id: str, context_size: str = DEFAULT_CONTEXT_SIZE
+    ) -> bool:
         total_tokens = await self.db.get_conversation_token_count(conversation_id)
-        model_info = self.router.get_model_info(model_id)
-        if not model_info or not model_info.context_window: 
-            return False
-            
-        if total_tokens >= model_info.context_window * self.summarization_threshold:
-            logger.warning("Context approaching limit.")
-            self._launch_background_task(
-                self._summarize_oldest_context(conversation_id, model_id)
-            )
+        window = resolve_context_window(self.router.get_model_info(model_id), context_size)
+
+        # Checked and marked without awaiting in between, so concurrent checks can't both launch
+        if total_tokens >= window * self.summarization_threshold and conversation_id not in self._summarizing:
+            logger.info(f"Context at {total_tokens}/{window} tokens; summarizing the oldest messages.")
+            self._summarizing.add(conversation_id)
+            self._launch_background_task(self._summarize_guarded(conversation_id, model_id))
             return True
         return False
+
+    async def _summarize_guarded(self, conversation_id: str, model_id: str) -> None:
+        """Summarize, then release the single-flight guard so the next trigger can run."""
+        try:
+            await self._summarize_oldest_context(conversation_id, model_id)
+        finally:
+            self._summarizing.discard(conversation_id)
 
     async def _generate_conversation_title(self, conversation_id: str, model_id: str) -> None:
         """
@@ -334,9 +444,8 @@ class BuddyOrchestrator:
         Triggered as a background task after the 2nd full exchange (4th message)
         so there is enough context for a meaningful title.
 
-        Uses whatever model the user is currently on; the Router's built-in
-        fallback chain ensures a free alternative is tried if the primary model
-        rejects or rate-limits the request.
+        Uses the active provider's small model; the Router's built-in fallback
+        chain tries free Gemini if that model rejects or rate-limits the request.
         """
         try:
             history = await self.db.get_conversation_history(conversation_id, limit=4)
@@ -349,11 +458,11 @@ class BuddyOrchestrator:
                 for msg in history
             )
 
-            # --- Primary path: ask the active model for a short title -------
+            # --- Primary path: ask the provider's small model for a short title ---
             title = ""
             try:
                 result = await self.router.get_completion(
-                    model_id=model_id,
+                    model_id=self.router.get_fast_model_for_provider(model_id),
                     messages=[
                         {
                             "role": "user",
@@ -496,7 +605,8 @@ Otherwise, if elements are entirely new, add them as 'add_facts'. Treat implicit
 
 Query: "{user_message}"
 Respond with ONLY the category word ('academic', 'finance', or 'general')."""
-        res = await self.router.get_completion(model_id=model_id, messages=[{"role": "user", "content": prompt}], max_tokens=10)
+        fast_model = self.router.get_fast_model_for_provider(model_id)
+        res = await self.router.get_completion(model_id=fast_model, messages=[{"role": "user", "content": prompt}], max_tokens=10)
         content = (res.content or "general").strip().lower()
         if "academic" in content:
             return "researcher"
@@ -505,17 +615,32 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
         return "buddy"
 
     async def process_message(
-        self, user_message: str, conversation_id: Optional[str] = None, model_id: str = "gemini-3.1-flash"
-    ) -> OrchestratorResponse:
+        self,
+        user_message: str,
+        conversation_id: Optional[str] = None,
+        model_id: str = DEFAULT_MODEL_ID,
+        context_size: str = DEFAULT_CONTEXT_SIZE,
+    ) -> AsyncIterator[Union[dict, OrchestratorResponse]]:
         from litellm import token_counter
+
+        self._loop = asyncio.get_running_loop()
 
         if not conversation_id:
             title = user_message[:50] + ("..." if len(user_message) > 50 else "")
             conversation_id = await self.db.create_conversation(title=title, model_id=model_id)
             logger.info("Created new conversation: %s", conversation_id)
 
+        prior_message_count = await self.db.count_messages(conversation_id)
+        memory_summary = await self.db.get_memory_summary(conversation_id)
+        memory_block = self._build_memory_block(memory_summary)
+
         query_keywords = self.db._normalizer.extract_keywords(user_message)
-        conversation_history = await self._load_conversation_context(conversation_id, query_keywords=query_keywords)
+        conversation_history = await self._load_conversation_context(
+            conversation_id,
+            query_keywords=query_keywords,
+            context_size=context_size,
+            summary_tokens=memory_summary.token_count if memory_summary else 0,
+        )
 
         # 1. Routing
         intent = await self._determine_intent(user_message, model_id)
@@ -524,7 +649,7 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
         # 2. Context / Agents
         is_finance_workflow = False
         if intent == "researcher":
-            system_prompt = self._build_researcher_prompt()
+            system_prompt = self._build_researcher_prompt() + memory_block
             agent = self.researcher_agent
             messages = [{"role": "system", "content": system_prompt}] + conversation_history + [{"role": "user", "content": user_message}]
         elif intent == "finance":
@@ -552,6 +677,7 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
             system_prompt = self._build_buddy_prompt(user_facts, model_id)
             if document_context:
                 system_prompt += document_context
+            system_prompt += memory_block
                 
             agent = self.buddy_agent
             messages = [{"role": "system", "content": system_prompt}] + conversation_history + [{"role": "user", "content": user_message}]
@@ -590,25 +716,27 @@ Respond with ONLY the category word ('academic', 'finance', or 'general')."""
             user_tokens = int(len((user_message or "").split()) * 1.3)
             
         user_msg_id = await self.db.save_message(
-            conversation_id=conversation_id, role="user", content=user_message, model_id=model_id, token_count=user_tokens, keywords=""
+            conversation_id=conversation_id, role="user", content=user_message, model_id=model_id, token_count=user_tokens, keywords=self._keywords_field(user_message)
         )
         asst_msg_id = await self.db.save_message(
-            conversation_id=conversation_id, role="assistant", content=result_content, model_id=result_model_used, token_count=result_token_count, keywords=""
+            conversation_id=conversation_id, role="assistant", content=result_content, model_id=result_model_used, token_count=result_token_count, keywords=self._keywords_field(result_content)
         )
 
-        await self._extract_facts_regex(user_message, conversation_id, model_id=model_id)
+        await self._extract_facts_regex(
+            user_message, conversation_id, model_id=self.router.get_fast_model_for_provider(model_id)
+        )
         
         # Launch LLM fact extraction as a background task to avoid blocking the reply
         self._launch_background_task(self._extract_facts_background(user_message, model_id))
 
-        # Generate conversation title after the 2nd full exchange (conversation_history
-        # holds messages BEFORE this turn, so len == 2 means we just completed turn 2)
-        if len(conversation_history) == 2:
+        # Generate conversation title after the 2nd full exchange (prior_message_count
+        # counts messages BEFORE this turn, so 2 means we just completed turn 2)
+        if prior_message_count == 2:
             self._launch_background_task(
                 self._generate_conversation_title(conversation_id, model_id)
             )
 
-        await self._check_context_window(conversation_id, model_id)
+        await self._check_context_window(conversation_id, model_id, context_size)
 
         yield OrchestratorResponse(
             response=result_content,

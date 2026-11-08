@@ -1,7 +1,8 @@
 import asyncio
 import threading
 import streamlit as st
-from core.discovery import discover_available_models, get_default_model
+from core.discovery import discover_available_models, get_default_model, get_provider_status
+from core.models import DEFAULT_CONTEXT_SIZE
 from core.database import create_database
 from core.router import create_router
 from agents.buddy import create_orchestrator
@@ -48,9 +49,9 @@ def get_system_components():
     """Initialize system components exactly once."""
     # Models
     models = discover_available_models(include_paid=True)
+    default_model = get_default_model()
     if not models:
-        models = [get_default_model()]
-    default_model = next((m for m in models if m.model_id == "gemini/gemini-2.5-flash"), models[0])
+        models = [default_model]  # No API key configured: chats fail until one is added
 
     # Database
     db = run_async(create_database(
@@ -87,3 +88,9 @@ def init_session_state():
         
     if "messages" not in st.session_state:
         st.session_state.messages = []
+
+    if "context_size" not in st.session_state:
+        st.session_state.context_size = DEFAULT_CONTEXT_SIZE
+
+    if "api_keys_configured" not in st.session_state:
+        st.session_state.api_keys_configured = any(get_provider_status().values())

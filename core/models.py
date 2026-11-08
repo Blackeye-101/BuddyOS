@@ -20,33 +20,48 @@ class ModelInfo:
     tier: str = "free"  # "free" or "paid" - indicates if model requires paid subscription
     context_window: int = 128000  # Total input context window size in tokens
     max_tokens: int = 4096  # Maximum output tokens per response
+    size: str = "balanced"  # "small" | "balanced" | "large": cost/performance class within its provider
+    reasoning: bool = False  # Spends hidden tokens thinking, so it needs output-token headroom
+    supports_temperature: bool = True  # Claude 5.5 and GPT-6 reject custom temperature values
 
 
 @dataclass(frozen=True)
 class ContextPreset:
-    """UI/CLI-selectable context size: what each request carries and when old turns get summarized."""
+    """UI/CLI-selectable context size: how much history each request carries and when old turns get summarized."""
     label: str
     window_tokens: int  # Rolling summarization starts at 75% of this
-    history_budget: int  # Max tokens of history sent per request
-    recent_messages: int  # Newest messages always sent, even over budget
+    history_budget: int  # Max tokens of history sent per request; the latest exchange is always sent
+    recent_messages: int  # Newest messages considered per request; even, so history starts on a user turn
 
 
 # Window >> history budget, otherwise the 75% summarization trigger would fire every turn
 CONTEXT_PRESETS: Dict[str, ContextPreset] = {
-    "small": ContextPreset("Small", window_tokens=8_000, history_budget=2_000, recent_messages=3),
+    "small": ContextPreset("Small", window_tokens=8_000, history_budget=2_000, recent_messages=4),
     "large": ContextPreset("Large", window_tokens=32_000, history_budget=6_000, recent_messages=8),
 }
-DEFAULT_CONTEXT_SIZE = "large"
+DEFAULT_CONTEXT_SIZE = "small"
+
+
+def get_context_preset(context_size: str) -> ContextPreset:
+    """Preset for a UI/CLI selection, falling back to the default for unknown values."""
+    return CONTEXT_PRESETS.get(context_size) or CONTEXT_PRESETS[DEFAULT_CONTEXT_SIZE]
 
 
 def resolve_context_window(model: Optional[ModelInfo], context_size: str) -> int:
     """Preset window, capped by what the model actually supports."""
-    window = CONTEXT_PRESETS[context_size].window_tokens
+    window = get_context_preset(context_size).window_tokens
     return min(window, model.context_window) if model else window
 
 
-DEFAULT_MODEL_ID = "gemini/gemini-3.8-flash"  # UI/CLI default; balanced, free tier
-FALLBACK_MODEL_ID = "gemini/gemini-3.5-flash-lite"  # Router last resort and Gemini background tasks; cheapest, free tier
+# Environment variable holding each provider's API key
+PROVIDER_KEY_ENV: Dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GEMINI_API_KEY",
+}
+
+DEFAULT_MODEL_ID = "gemini/gemini-3.5-flash-lite"  # Gemini 3.8 Flash took 45-120s per reply on a free-tier key (2026-11-08)
+FALLBACK_MODEL_ID = "gemini/gemini-3.5-flash-lite"  # Router's last resort; free tier
 
 # Model Registry - small / balanced / large per provider, verified against provider docs on 2026-10-30
 MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
@@ -59,7 +74,9 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             description="Cheapest Claude; high-volume, latency-sensitive tasks",
             tier="paid",
             context_window=1_000_000,
-            max_tokens=128_000
+            max_tokens=128_000,
+            size="small",
+            supports_temperature=False
         ),
         ModelInfo(
             model_id="claude-sonnet-5-5",
@@ -69,7 +86,9 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             description="Best mix of speed, intelligence and cost",
             tier="paid",
             context_window=1_000_000,
-            max_tokens=128_000
+            max_tokens=128_000,
+            size="balanced",
+            supports_temperature=False
         ),
         ModelInfo(
             model_id="claude-opus-5-5",
@@ -79,7 +98,9 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             description="Highest capability for long-running agentic and knowledge work; most expensive",
             tier="paid",
             context_window=1_000_000,
-            max_tokens=128_000
+            max_tokens=128_000,
+            size="large",
+            supports_temperature=False
         ),
     ],
     "openai": [
@@ -90,8 +111,11 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             requires_key="OPENAI_API_KEY",
             description="Most efficient GPT-6; focused, high-volume tasks",
             tier="paid",
-            context_window=1_050_000,
-            max_tokens=128_000
+            context_window=922_000,
+            max_tokens=128_000,
+            size="small",
+            reasoning=True,
+            supports_temperature=False
         ),
         ModelInfo(
             model_id="gpt-6.1-sol",
@@ -100,8 +124,11 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             requires_key="OPENAI_API_KEY",
             description="Near-flagship performance at a much lower cost",
             tier="paid",
-            context_window=1_050_000,
-            max_tokens=128_000
+            context_window=922_000,
+            max_tokens=128_000,
+            size="balanced",
+            reasoning=True,
+            supports_temperature=False
         ),
         ModelInfo(
             model_id="gpt-6-astra",
@@ -110,20 +137,11 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             requires_key="OPENAI_API_KEY",
             description="Flagship for the most demanding reasoning and coding; most expensive",
             tier="paid",
-            context_window=1_050_000,
-            max_tokens=128_000
-        ),
-    ],
-    "xai": [
-        ModelInfo(
-            model_id="grok-4-20",
-            provider="xai",
-            display_name="Grok 4-20",
-            requires_key="XAI_API_KEY",
-            description="xAI's Grok model",
-            tier="paid",
-            context_window=128000,  # 128K tokens (estimated)
-            max_tokens=8192  # 8K max output (estimated)
+            context_window=922_000,
+            max_tokens=128_000,
+            size="large",
+            reasoning=True,
+            supports_temperature=False
         ),
     ],
     "google": [
@@ -135,7 +153,8 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             description="Cheapest Gemini; high-volume agentic tasks (free tier available)",
             tier="free",
             context_window=1_048_576,
-            max_tokens=65_536
+            max_tokens=65_536,
+            size="small"
         ),
         ModelInfo(
             model_id="gemini/gemini-3.8-flash",
@@ -145,103 +164,26 @@ MODEL_REGISTRY: Dict[str, List[ModelInfo]] = {
             description="Most intelligent Flash; best cost/performance (free tier available)",
             tier="free",
             context_window=1_048_576,
-            max_tokens=65_536
+            max_tokens=65_536,
+            size="balanced",
+            reasoning=True
         ),
         ModelInfo(
             model_id="gemini/gemini-4-argon",
             provider="google",
             display_name="Gemini 4 Argon (Large)",
             requires_key="GEMINI_API_KEY",
-            description="Flagship reasoning model; not on the free tier, most expensive",
+            description="Flagship reasoning model; paid plan required, most expensive",
             tier="paid",
             context_window=1_048_576,
-            max_tokens=1_048_576
-        ),
-    ],
-    "groq": [
-        ModelInfo(
-            model_id="groq/openai/gpt-oss-120b",
-            provider="groq",
-            display_name="GPT-OSS-120B",
-            requires_key="GROQ_API_KEY",
-            description="Open-source model on Groq infrastructure",
-            tier="paid",
-            context_window=131072,  # 131K tokens (estimated)
-            max_tokens=8192  # 8K max output (estimated)
-        ),
-        ModelInfo(
-            model_id="groq/meta-llama/llama-4-scout-17b-16e-instruct",
-            provider="groq",
-            display_name="Llama 4 Scout 17B",
-            requires_key="GROQ_API_KEY",
-            description="Meta's Llama 4 Scout on Groq",
-            tier="paid",
-            context_window=131072,  # 131K tokens (estimated)
-            max_tokens=8192  # 8K max output (estimated)
-        ),
-    ],
-    "openrouter": [
-        ModelInfo(
-            model_id="openrouter/auto",
-            provider="openrouter",
-            display_name="OpenRouter Auto",
-            requires_key="OPENROUTER_API_KEY",
-            description="Automatic model selection",
-            tier="free",
-            context_window=128000,  # 128K tokens (varies by routed model)
-            max_tokens=16000  # 16K max output (varies by routed model)
-        ),
-        # DeepSeek Free Models
-        ModelInfo(
-            model_id="openrouter/deepseek/deepseek-r1:free",
-            provider="openrouter",
-            display_name="DeepSeek R1 (Free)",
-            requires_key="OPENROUTER_API_KEY",
-            description="671B reasoning model, performance on par with OpenAI o1",
-            tier="free",
-            context_window=128000,  # 128K tokens
-            max_tokens=32768  # 32K max output
-        ),
-        ModelInfo(
-            model_id="openrouter/deepseek/deepseek-r1-distill-qwen-32b:free",
-            provider="openrouter",
-            display_name="DeepSeek R1 Distill Qwen 32B (Free)",
-            requires_key="OPENROUTER_API_KEY",
-            description="32B distilled reasoning model, outperforms o1-mini",
-            tier="free",
-            context_window=128000,  # 128K tokens
-            max_tokens=16000  # 16K max output
-        ),
-        ModelInfo(
-            model_id="openrouter/deepseek/deepseek-r1-distill-qwen-14b:free",
-            provider="openrouter",
-            display_name="DeepSeek R1 Distill Qwen 14B (Free)",
-            requires_key="OPENROUTER_API_KEY",
-            description="14B compact reasoning model",
-            tier="free",
-            context_window=128000,  # 128K tokens
-            max_tokens=16000  # 16K max output
-        ),
-        # Qwen Free Models
-        ModelInfo(
-            model_id="openrouter/qwen/qwen3-coder:free",
-            provider="openrouter",
-            display_name="Qwen3 Coder 480B (Free)",
-            requires_key="OPENROUTER_API_KEY",
-            description="480B MoE coding model, 35B active parameters",
-            tier="free",
-            context_window=262144,  # 262K tokens
-            max_tokens=16000  # 16K max output
-        ),
-        ModelInfo(
-            model_id="openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
-            provider="openrouter",
-            display_name="Qwen3 Next 80B (Free)",
-            requires_key="OPENROUTER_API_KEY",
-            description="80B fast instruction model for RAG and agents",
-            tier="free",
-            context_window=262144,  # 262K tokens
-            max_tokens=16000  # 16K max output
+            max_tokens=1_048_576,
+            size="large",
+            reasoning=True
         ),
     ],
 }
+
+
+def get_small_model_id(provider: str) -> Optional[str]:
+    """Cheapest model of a provider; used for background tasks and as the first fallback."""
+    return next((m.model_id for m in MODEL_REGISTRY.get(provider, []) if m.size == "small"), None)

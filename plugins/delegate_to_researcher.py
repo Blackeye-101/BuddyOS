@@ -14,5 +14,9 @@ logger = logging.getLogger(__name__)
 def delegate_to_researcher_for_academic(query: str, context: dict = None) -> str:
     logger.info(f"Delegating academic research to Researcher for: {query}")
     if context and context.get("supervisor"):
-        return context["supervisor"].run_agent_sync("researcher", f"Please research the latest academic papers on: {query}")
+        return context["supervisor"].run_agent_sync(
+            "researcher",
+            f"Please research the latest academic papers on: {query}",
+            model_id=context.get("model_id"),
+        )
     return "Error: Supervisor context not available for delegation."

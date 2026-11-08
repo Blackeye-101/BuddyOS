@@ -122,6 +122,7 @@ class BuddyDatabase:
                 created_at TEXT NOT NULL,
                 keywords TEXT NOT NULL DEFAULT '',
                 topics TEXT NOT NULL DEFAULT '',
+                archived INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (conversation_id) 
                     REFERENCES conversations(id) 
                     ON DELETE CASCADE
@@ -132,6 +133,7 @@ class BuddyDatabase:
         for col, definition in [
             ("keywords", "TEXT NOT NULL DEFAULT ''"),
             ("topics",   "TEXT NOT NULL DEFAULT ''"),
+            ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             try:
                 await self._sqlite_conn.execute(
@@ -464,7 +466,8 @@ class BuddyDatabase:
     async def get_conversation_history(
         self,
         conversation_id: str,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        include_archived: bool = True
     ) -> List[Message]:
         """
         Get all messages in a conversation.
@@ -472,15 +475,17 @@ class BuddyDatabase:
         Args:
             conversation_id: UUID of conversation
             limit: Optional limit on number of messages
+            include_archived: False to leave out messages already condensed into the summary
             
         Returns:
             List of Message objects in chronological order
         """
-        query = """
+        archived_filter = "" if include_archived else "AND archived = 0"
+        query = f"""
             SELECT id, conversation_id, role, content, model_id, token_count, created_at,
                    keywords, topics
             FROM messages
-            WHERE conversation_id = ?
+            WHERE conversation_id = ? {archived_filter}
             ORDER BY created_at ASC
         """
 
@@ -513,18 +518,25 @@ class BuddyDatabase:
         """
         Two-tiered retrieval of conversation history for LLM context.
 
-        Tier 1 (temporal): the absolute last `tier1_limit` messages.
+        Only active dialogue is considered: archived messages (already condensed
+        into the rolling summary) and the summary row itself are left out; the
+        summary is fetched separately with get_memory_summary().
+
+        Tier 1 (temporal): the last `tier1_limit` messages, trimmed from the oldest
+            end while they exceed `token_budget`. The latest exchange is always kept.
         Tier 2 (semantic):  up to 3 historical messages whose `keywords`
             column contains any of `query_keywords` (exact-word match via
-            comma-sentinel LIKE pattern ',keyword,').
+            comma-sentinel LIKE pattern ',keyword,') and that fit in the
+            remaining budget.
 
-        The merged list is deduplicated, sorted chronologically, and capped
-        at `token_budget` tokens. Tier 1 messages are always included first.
+        The merged list is deduplicated and sorted chronologically. Providers expect
+        alternating turns that begin with the user, so neighbouring messages from the
+        same role are merged and leading assistant turns are dropped.
 
         Args:
             conversation_id: UUID of conversation
             query_keywords: Keywords extracted from the current user message
-            tier1_limit: Number of most-recent messages always included
+            tier1_limit: Maximum number of most-recent messages included
             token_budget: Maximum total token_count across all returned messages
 
         Returns:
@@ -536,7 +548,7 @@ class BuddyDatabase:
             """
             SELECT id, role, content, token_count, created_at
             FROM messages
-            WHERE conversation_id = ?
+            WHERE conversation_id = ? AND archived = 0 AND role != 'system'
             ORDER BY created_at DESC
             LIMIT ?
             """,
@@ -545,6 +557,10 @@ class BuddyDatabase:
             async for row in cursor:
                 tier1_rows.append(row)
         tier1_rows.reverse()  # chronological order
+
+        # Over budget: drop the oldest messages, but always keep the latest exchange
+        while len(tier1_rows) > 2 and sum(r[3] for r in tier1_rows) > token_budget:
+            tier1_rows.pop(0)
         tier1_ids = {row[0] for row in tier1_rows}
 
         # -- Tier 2: keyword-matched historical messages ----------------------
@@ -559,7 +575,7 @@ class BuddyDatabase:
                     """
                     SELECT id, role, content, token_count, created_at
                     FROM messages
-                    WHERE conversation_id = ? AND keywords LIKE ?
+                    WHERE conversation_id = ? AND archived = 0 AND role != 'system' AND keywords LIKE ?
                     """,
                     (conversation_id, pattern),
                 ) as cursor:
@@ -593,7 +609,15 @@ class BuddyDatabase:
         ]
         all_rows.sort(key=lambda r: r[3])  # sort by created_at ASC
 
-        return [{"role": r[1], "content": r[2]} for r in all_rows]
+        history: List[Dict[str, str]] = []
+        for _, role, content, _ in all_rows:
+            if not history and role != "user":
+                continue  # history must start with a user turn
+            if history and history[-1]["role"] == role:
+                history[-1]["content"] += "\n\n" + content  # keep turns alternating
+            else:
+                history.append({"role": role, "content": content})
+        return history
     
     async def get_conversation_token_count(self, conversation_id: str) -> int:
         """
@@ -603,10 +627,10 @@ class BuddyDatabase:
             conversation_id: UUID of conversation
             
         Returns:
-            Total token count across all messages
+            Total token count across active (non-archived) messages
         """
         async with self._sqlite_conn.execute(
-            "SELECT SUM(token_count) FROM messages WHERE conversation_id = ?",
+            "SELECT SUM(token_count) FROM messages WHERE conversation_id = ? AND archived = 0",
             (conversation_id,)
         ) as cursor:
             row = await cursor.fetchone()
@@ -614,7 +638,7 @@ class BuddyDatabase:
 
     async def get_oldest_messages(self, conversation_id: str, limit: int) -> List[Message]:
         """
-        Get the oldest messages in a conversation.
+        Get the oldest active (non-archived) messages in a conversation.
         Useful for context window summarization.
         """
         async with self._sqlite_conn.execute(
@@ -622,7 +646,7 @@ class BuddyDatabase:
             SELECT id, conversation_id, role, content, model_id, 
                    token_count, created_at, keywords, topics
             FROM messages 
-            WHERE conversation_id = ? 
+            WHERE conversation_id = ? AND archived = 0 
             ORDER BY created_at ASC 
             LIMIT ?
             """,
@@ -654,6 +678,59 @@ class BuddyDatabase:
             message_ids
         )
         await self._sqlite_conn.commit()
+
+    async def archive_messages(self, message_ids: List[str]) -> None:
+        """
+        Mark messages as archived: they stay in the conversation transcript but are
+        no longer sent to the model or counted toward the context window.
+        """
+        if not message_ids:
+            return
+
+        placeholders = ",".join("?" for _ in message_ids)
+        await self._sqlite_conn.execute(
+            f"UPDATE messages SET archived = 1 WHERE id IN ({placeholders})",
+            message_ids
+        )
+        await self._sqlite_conn.commit()
+
+    async def get_memory_summary(self, conversation_id: str) -> Optional[Message]:
+        """Latest active rolling-summary row (role 'system') of a conversation, if any."""
+        async with self._sqlite_conn.execute(
+            """
+            SELECT id, conversation_id, role, content, model_id, token_count, created_at,
+                   keywords, topics
+            FROM messages
+            WHERE conversation_id = ? AND role = 'system' AND archived = 0
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (conversation_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+        return Message(
+            id=row[0],
+            conversation_id=row[1],
+            role=row[2],
+            content=row[3],
+            model_id=row[4],
+            token_count=row[5],
+            created_at=row[6],
+            keywords=row[7] or "",
+            topics=row[8] or "",
+        )
+
+    async def count_messages(self, conversation_id: str) -> int:
+        """Number of user/assistant messages in a conversation, archived ones included."""
+        async with self._sqlite_conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role != 'system'",
+            (conversation_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
     
     # ============================================
     # User Facts Methods (DuckDB - Async Wrapped)

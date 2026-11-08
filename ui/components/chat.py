@@ -75,6 +75,8 @@ def render_chat(user_input=None):
         else:
             for msg in st.session_state.messages:
                 role = msg.get("role", "assistant") if isinstance(msg, dict) else msg.role
+                if role == "system":
+                    continue  # Rolling-summary rows are model context, not part of the visible chat
                 content = msg.get("content", "") if isinstance(msg, dict) else msg.content
                 with st.chat_message(role):
                     st.markdown(content)
@@ -107,6 +109,7 @@ def render_chat(user_input=None):
                         user_message=pending_message,
                         conversation_id=st.session_state.conversation_id,
                         model_id=st.session_state.current_model_id,
+                        context_size=st.session_state.context_size,
                     )
                     
                     for item in run_async_gen(gen):
@@ -153,7 +156,7 @@ def render_chat(user_input=None):
                 )
                 if response.fallback_occurred:
                     st.toast(
-                        f"Fallback triggered! Failed over from {response.fallback_from}",
+                        f"Fallback triggered! {response.fallback_from} failed; answered by {response.model_used}",
                         icon="⚠️",
                     )
                 if response.extracted_facts:

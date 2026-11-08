@@ -10,10 +10,10 @@ This document is a practical runbook: what the system does, how to install it in
 
 | Capability                                  | Summary                                                                                                                                                                                                                                                                              |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Model-agnostic routing**                  | Uses [LiteLLM](https://github.com/BerriAI/litellm) to discover which models you can use based on the API keys present in your `.env`, and falls back automatically to the next available model if one fails.                                                                         |
+| **Model-agnostic routing**                  | Uses [LiteLLM](https://github.com/BerriAI/litellm) to discover which models you can use based on the API keys present in your `.env`, and, if a model fails, falls back to the cheapest model of the same provider and then to free Gemini 3.5 Flash-Lite.                           |
 | **Hybrid persistence**                      | SQLite (`aiosqlite`) stores conversations/messages transactionally; DuckDB stores "User Facts" and document embeddings for analytical/vector lookups.                                                                                                                                |
 | **Continuous learning (fact memory)**       | Buddy silently extracts facts about you (job, preferences, name, etc.) from conversation in the background and stores them as active facts, later injecting only the top-k most relevant facts (via cosine similarity search, `fastembed` + DuckDB VSS/HNSW) into the system prompt. |
-| **Context window management**               | Tracks token usage and, once ~75% of the context window is used, automatically compresses the oldest half of the conversation into a dense summary block instead of just warning.                                                                                                    |
+| **Context window management**               | A Small/Large context size (UI sidebar or `/context`) sets how much history each message carries; once ~75% of that window is used, the oldest half of the conversation is condensed into a rolling summary (the originals stay in your chat history).                               |
 | **Local document grounding (Personal RAG)** | Ingest `.txt`, `.md`, `.csv`, `.pdf`, `.docx` files (via `/ingest` in the CLI or the uploader in the UI). Files are chunked, embedded with `fastembed` (`BAAI/bge-small-en-v1.5`, ONNX, no PyTorch), and retrieved into context when your message references a document.             |
 | **Plugin-based tool system**                | Tools live as independent, auto-registering modules under `plugins/` (web search via DuckDuckGo, ArXiv search, finance data, agent delegation) and are decorated with `@plugin(...)` in `core/tools.py`'s `ToolRegistry`.                                                            |
 | **Multi-agent delegation**                  | A Buddy agent handles general chat, a Researcher agent handles rigorous academic queries (ArXiv-only, zero-hallucination guardrails), and a 4-stage Finance Workflow (Scraper → Processor → Matcher → Validator) produces institutional-style market reports.                        |
@@ -54,7 +54,7 @@ Watch these first if you want to see expected behavior before running the app yo
 
 - Python 3.12 or newer
 - Git
-- At least one LLM API key (e.g. Gemini, OpenAI, Anthropic, Groq, or OpenRouter) — Gemini has a usable free tier and is the default fallback model.
+- At least one LLM API key (Gemini, OpenAI, or Anthropic) — Gemini has a usable free tier, and its Flash-Lite model is both the default model and the final fallback.
 
 ### 4.2 Clone the repository
 
@@ -93,8 +93,6 @@ Create a `.env` file in the `buddy-os/` project root (this file is gitignored �
 GEMINI_API_KEY=your_gemini_api_key_here
 OPENAI_API_KEY=your_openai_api_key_here
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
-GROQ_API_KEY=your_groq_api_key_here
-OPENROUTER_API_KEY=your_openrouter_api_key_here
 ```
 
 You only need one key configured for BuddyOS to run — it discovers whichever providers are configured at startup and lists their models. Never share or commit real API key values; rotate any key that is accidentally exposed.
@@ -139,11 +137,27 @@ The CLI supports the following in-chat commands:
 
 - `/help` — show available commands
 - `/facts` — view what Buddy currently knows about you
-- `/model` — switch the active AI model
+- `/model` — switch the active AI model (the conversation continues)
+- `/context` — switch the context window size (`/context small` or `/context large` sets it directly)
 - `/new` — start a fresh conversation
 - `/history` — view recent conversations
 - `/ingest` — map a local file (`.txt`, `.md`, `.pdf`, `.csv`, `.docx`) for searching
 - `/exit` — save state and exit gracefully
+
+### Models and context window
+
+BuddyOS offers three models per provider, from cheapest to most capable. Only providers whose API key is in your `.env` are listed.
+
+| Provider  | Small (cheapest)                  | Balanced                     | Large (most capable)       |
+| --------- | --------------------------------- | ---------------------------- | -------------------------- |
+| Google    | Gemini 3.5 Flash-Lite (free tier) | Gemini 3.8 Flash (free tier) | Gemini 4 Argon (paid plan) |
+| Anthropic | Claude Haiku 5.5                  | Claude Sonnet 5.5            | Claude Opus 5.5            |
+| OpenAI    | GPT-6 Luna                        | GPT-6.1 Sol                  | GPT-6 Astra                |
+
+- **Default model**: Gemini 3.5 Flash-Lite (fast, free tier). Without a Google key, the cheapest model of your first configured provider is used.
+- **Fallback chain**: if the selected model fails (rate limit, timeout, provider error), BuddyOS tries the cheapest model of the same provider, then free Gemini 3.5 Flash-Lite. Providers without a configured key are skipped, and the UI/CLI tells you when a fallback answered.
+- **Background work** (intent routing, titles, summaries, fact extraction) always runs on the cheapest model of the selected provider.
+- **Context window** (UI sidebar or `/context`): _Small_ sends the last ~2 exchanges (up to 2K tokens of history) and summarizes once the chat passes ~6K tokens; _Large_ sends the last ~4 exchanges (up to 6K tokens) and summarizes past ~24K tokens. Summarized messages are archived: they stay in your chat history but are no longer sent to the model. Relevant older messages are still recalled by keyword.
 
 ---
 
@@ -189,3 +203,4 @@ buddy-os/
 - **Embedding model fails to download**: run the manual `fastembed` download command in section 4.5, or check outbound network access to Hugging Face.
 - **DuckDB VSS extension unavailable**: BuddyOS automatically falls back to a full fact scan (slower semantic search) instead of the HNSW index; functionality is unaffected.
 - **Logs**: check `logs/buddy-os.log` for detailed DEBUG-level output; the console only shows WARNING+.
+- **A model keeps falling back**: the log names the failing model and the error. Gemini 4 Argon needs a paid Google plan (free-tier keys get a quota error), and Gemini 3.8 Flash can take tens of seconds per reply on free-tier keys; requests slower than 90 seconds fall back automatically.
