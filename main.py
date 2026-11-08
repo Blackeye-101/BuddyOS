@@ -44,7 +44,6 @@ _root_logger.addHandler(_console_handler)
 import litellm  # noqa: E402
 litellm.suppress_debug_info = True
 litellm.verbose = False
-litellm.drop_params = True  # Strip unsupported params (e.g. temperature for gpt-5) before sending
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 logging.getLogger("litellm").setLevel(logging.WARNING)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -55,8 +54,9 @@ DATA_DIR.mkdir(exist_ok=True)
 
 from core.discovery import discover_available_models, get_default_model
 from core.database import create_database
+from core.models import CONTEXT_PRESETS, DEFAULT_CONTEXT_SIZE, resolve_context_window
 from core.router import create_router
-from agents.buddy import create_orchestrator
+from agents.buddy import OrchestratorResponse, create_orchestrator
 
 
 class BuddyOSCLI:
@@ -76,6 +76,7 @@ class BuddyOSCLI:
         self.current_conversation_id = None
         self.current_model_id = None
         self.available_models = []  # Store available models for switching
+        self.current_context_size = DEFAULT_CONTEXT_SIZE
     
     async def initialize(self):
         """Initialize all BuddyOS components."""
@@ -122,16 +123,8 @@ class BuddyOSCLI:
             print(f"  {i}. {tier_icon} {model.display_name} ({model.provider})")
         print()
         
-        # Select default model - Gemini 2.5 Flash (stable)
-        default_model = None
-        for model in self.available_models:
-            if model.model_id == "gemini/gemini-2.5-flash":  # ✅ Actual Google API name
-                default_model = model
-                break
-        
-        # If Gemini 2.5 Flash not available, use first model
-        if not default_model:
-            default_model = self.available_models[0]
+        # Select the default model: the registry default when configured, else the cheapest available
+        default_model = get_default_model()
         
         self.current_model_id = default_model.model_id
         print(f"🎯 Using default model: {default_model.display_name}")
@@ -156,6 +149,7 @@ class BuddyOSCLI:
         print("  /help     - Show this help message")
         print("  /facts    - Show what Buddy knows about you")
         print("  /model    - Switch to a different model")
+        print("  /context  - Switch context window size (small / large)")
         print("  /new      - Start a new conversation")
         print("  /history  - Show recent conversations")
         print("  /ingest   - Map a local file for searching (.txt, .md, .pdf, .csv, .docx)")
@@ -257,10 +251,7 @@ class BuddyOSCLI:
                     print(f"✅ Switched from {old_model_name} to {selected_model.display_name}")
                     print()
                     
-                    # Start a new conversation with the new model
-                    if self.current_conversation_id:
-                        print("💡 Starting new conversation with selected model...")
-                        await self.start_new_conversation()
+                    # The conversation continues; the new model takes over from the next message
                 else:
                     print(f"❌ Invalid selection. Please choose 1-{len(self.available_models)}")
                     print()
@@ -272,6 +263,46 @@ class BuddyOSCLI:
             print(f"❌ Error during model selection: {e}")
             print()
     
+    async def show_context_selection(self, requested: str = ""):
+        """Show the context window sizes and switch between them (applies from the next message)."""
+        current_model = next((m for m in self.available_models if m.model_id == self.current_model_id), None)
+        sizes = list(CONTEXT_PRESETS)
+
+        if requested:
+            if requested not in CONTEXT_PRESETS:
+                print(f"❌ Unknown context size '{requested}'. Choose one of: {', '.join(sizes)}")
+                print()
+                return
+            choice = requested
+        else:
+            print("🪟 Context Window Sizes:")
+            print()
+            for i, key in enumerate(sizes, 1):
+                preset = CONTEXT_PRESETS[key]
+                window = resolve_context_window(current_model, key)
+                current_marker = " ← Current" if key == self.current_context_size else ""
+                print(
+                    f"  {i}. {preset.label} ({window // 1000}K): last ~{preset.recent_messages // 2} exchanges, "
+                    f"up to {preset.history_budget // 1000}K tokens of history{current_marker}"
+                )
+            print()
+            print("Enter number to switch (or 'c' to cancel): ", end="")
+            raw = input().strip().lower()
+
+            if raw in ("", "c"):
+                print("Context selection cancelled")
+                print()
+                return
+            if not raw.isdigit() or not 1 <= int(raw) <= len(sizes):
+                print(f"❌ Invalid selection. Please choose 1-{len(sizes)}")
+                print()
+                return
+            choice = sizes[int(raw) - 1]
+
+        self.current_context_size = choice
+        print(f"✅ Context window set to {CONTEXT_PRESETS[choice].label}")
+        print()
+
     async def start_new_conversation(self):
         """Start a new conversation."""
         print("✨ Starting new conversation...")
@@ -313,6 +344,10 @@ class BuddyOSCLI:
                     
                     elif command == "/model":
                         await self.show_model_selection()
+                        continue
+                    
+                    elif command == "/context" or command.startswith("/context "):
+                        await self.show_context_selection(command[len("/context"):].strip())
                         continue
                     
                     elif command == "/new":
@@ -372,11 +407,24 @@ class BuddyOSCLI:
                 # Process message through orchestrator
                 print("Buddy: ", end="", flush=True)
                 
-                response = await self.orchestrator.process_message(
+                response = None
+                shown_status = False
+                async for item in self.orchestrator.process_message(
                     user_message=user_input,
                     conversation_id=self.current_conversation_id,
-                    model_id=self.current_model_id
-                )
+                    model_id=self.current_model_id,
+                    context_size=self.current_context_size,
+                ):
+                    if isinstance(item, dict) and item.get("type") == "status":
+                        print(f"\n   ⚙️  {item['msg']}", end="", flush=True)
+                        shown_status = True
+                    elif isinstance(item, OrchestratorResponse):
+                        response = item
+                
+                if response is None:
+                    raise RuntimeError("The orchestrator finished without producing a response")
+                if shown_status:
+                    print()
                 
                 # Update conversation ID if new
                 if not self.current_conversation_id:

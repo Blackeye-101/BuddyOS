@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 def delegate_to_buddy_for_web_search(query: str, context: dict = None) -> str:
     logger.info(f"Delegating web search to Buddy for: {query}")
     if context and context.get("supervisor"):
-        # Assuming run_agent_sync is implemented inside supervisor
-        return context["supervisor"].run_agent_sync("buddy", f"Search the web and briefly summarize the answer for this topic: {query}")
+        return context["supervisor"].run_agent_sync(
+            "buddy",
+            f"Search the web and briefly summarize the answer for this topic: {query}",
+            model_id=context.get("model_id"),
+        )
     return "Error: Supervisor context not available for delegation."

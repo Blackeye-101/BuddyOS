@@ -35,7 +35,6 @@ if not _root.handlers:          # guard: only configure once per process
     import litellm
     litellm.suppress_debug_info = True
     litellm.verbose = False
-    litellm.drop_params = True
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     logging.getLogger("litellm").setLevel(logging.WARNING)
 # ──────────────────────────────────────────────────────────────────────────────

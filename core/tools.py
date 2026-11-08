@@ -66,8 +66,11 @@ class ToolRegistry:
                 })
         return agent_tools if agent_tools else None
 
-    def execute_tool(self, function_name: str, arguments_json: str) -> str:
-        """Execute a tool with automatic retry logic for transient failures."""
+    def execute_tool(self, function_name: str, arguments_json: str, run_context: Optional[Dict[str, Any]] = None) -> str:
+        """Execute a tool with automatic retry logic for transient failures.
+
+        run_context carries per-request values (such as the active model_id) to plugins that accept `context`.
+        """
         if function_name not in self._tools:
             return f"Error: Tool '{function_name}' not found."
         
@@ -82,7 +85,8 @@ class ToolRegistry:
             args['context'] = {
                 'db': self.db,
                 'router': self.router,
-                'supervisor': self.supervisor
+                'supervisor': self.supervisor,
+                **(run_context or {}),
             }
 
         max_retries = 3

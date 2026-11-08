@@ -9,7 +9,7 @@ import os
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
-from core.models import ModelInfo, MODEL_REGISTRY
+from core.models import ModelInfo, MODEL_REGISTRY, PROVIDER_KEY_ENV, DEFAULT_MODEL_ID
 
 
 def get_provider_status() -> Dict[str, bool]:
@@ -21,24 +21,11 @@ def get_provider_status() -> Dict[str, bool]:
     """
     load_dotenv()
     
-    provider_keys = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "xai": "XAI_API_KEY",
-        "google": "GEMINI_API_KEY",
-        "groq": "GROQ_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-    }
-    
     status = {}
-    for provider, key_name in provider_keys.items():
+    for provider, key_name in PROVIDER_KEY_ENV.items():
         key_value = os.getenv(key_name)
-        # Check if key exists and is not the placeholder value
-        status[provider] = bool(
-            key_value and 
-            key_value != f"your_{provider}_key_here" and
-            not key_value.startswith("your_")
-        )
+        # A key counts only if it exists and is not a "your_..._here" placeholder
+        status[provider] = bool(key_value and not key_value.startswith("your_"))
     
     return status
 
@@ -53,8 +40,8 @@ def discover_available_models(include_paid: bool = True) -> List[ModelInfo]:
     
     Returns:
         List of ModelInfo objects for models whose provider keys are configured.
+        Empty when no API key is configured.
     """
-    load_dotenv()
     provider_status = get_provider_status()
     
     available_models = []
@@ -65,22 +52,6 @@ def discover_available_models(include_paid: bool = True) -> List[ModelInfo]:
                 # Filter by tier if include_paid is False
                 if include_paid or model.tier == "free":
                     available_models.append(model)
-    
-    # If no models are available, return Gemini Flash as fallback
-    # (assuming it's the free tier option)
-    if not available_models:
-        # Return free tier options that don't require keys
-        fallback = ModelInfo(
-            model_id="gemini/gemini-2.5-flash",  # ✅ Actual Google API model name
-            provider="google",
-            display_name="Gemini 2.5 Flash (Fallback)",
-            requires_key="GEMINI_API_KEY",
-            description="Default free model - configure API keys for more options",
-            tier="free",
-            context_window=1000000,
-            max_tokens=64000
-        )
-        available_models.append(fallback)
     
     return available_models
 
@@ -117,28 +88,24 @@ def get_default_model() -> ModelInfo:
     Get the default model to use.
     
     Priority:
-    1. First available configured model
-    2. Gemini Flash as fallback
+    1. DEFAULT_MODEL_ID, if its provider key is configured
+    2. The cheapest (small) model of the first configured provider
+    3. DEFAULT_MODEL_ID anyway, so callers always get a model (calls fail until a key is added)
     
     Returns:
         ModelInfo object for the default model.
     """
     available = discover_available_models()
     
-    if available:
-        return available[0]
+    for model in available:
+        if model.model_id == DEFAULT_MODEL_ID:
+            return model
     
-    # Ultimate fallback
-    return ModelInfo(
-        model_id="gemini/gemini-2.5-flash",  # ✅ Actual Google API model name
-        provider="google",
-        display_name="Gemini 2.5 Flash",
-        requires_key="GEMINI_API_KEY",
-        description="Free tier default model",
-        tier="free",
-        context_window=1000000,
-        max_tokens=64000
-    )
+    for model in available:
+        if model.size == "small":
+            return model
+    
+    return get_model_by_id(DEFAULT_MODEL_ID)
 
 
 if __name__ == "__main__":

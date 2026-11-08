@@ -17,6 +17,8 @@ from uuid import uuid4
 
 import litellm
 
+from core.models import FALLBACK_MODEL_ID
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -133,7 +135,7 @@ class FactNormalizer:
 
     async def _llm_normalize(self, category: str, fact_text: str, model: Optional[str] = None) -> str:
         """Ask the LLM to produce a snake_case key for an unrecognised fact."""
-        effective_model = model or (self._router.ultimate_fallback if self._router else "gemini/gemini-2.5-flash")
+        effective_model = model or FALLBACK_MODEL_ID
         prompt = (
             f"Return ONLY a snake_case key (max 6 words, lowercase, underscores only) "
             f"that identifies the TYPE of information — not the value itself — "
@@ -207,7 +209,7 @@ class FactNormalizer:
 
         Falls back to the first two keywords on any error.
         """
-        effective_model = model or (self._router.ultimate_fallback if self._router else "gemini/gemini-2.5-flash")
+        effective_model = model or FALLBACK_MODEL_ID
         prompt = (
             "Return 1-3 comma-separated topic labels (lowercase snake_case, "
             "e.g. python_programming, travel_plans) that best describe the "
